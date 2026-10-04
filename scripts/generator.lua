@@ -358,7 +358,7 @@ local function to_grid(b)
   return rows
 end
 
-local function build(n, m, ug_max)
+local function build_core(n, m, ug_max)
   local b = new_builder(ug_max)
   for i = 0, n - 1 do spawn(b, i) end
   straight(b, 1) -- input ports
@@ -433,6 +433,50 @@ local function build(n, m, ug_max)
   straight(b, bottom)
   straight(b, 1) -- output ports
   draw_loops(b, lefts, rights, Lc, Ltop)
+  return b
+end
+
+-- Splits every stream into 2^k with splitter trees. Stream i owns columns
+-- [base + (i-1) 2^k, base + i 2^k); at each level a stream sits just left of
+-- the middle of its columns and a splitter halves them.
+local function trees(b, k)
+  local L = 2 ^ k
+  local list = {}
+  local base = b.streams[1].col
+  for i, st in ipairs(b.streams) do list[i] = {st = st, a = base + (i - 1) * L, L = L} end
+  for _ = 1, k do
+    local targets = {}
+    for _, v in ipairs(list) do targets[v.st] = v.a + v.L / 2 - 1 end
+    move(b, targets)
+    straight(b, 1)
+    -- one splitter per stream; its right half has no input
+    for _, v in ipairs(list) do
+      put(b, v.st.col, b.level, "S")
+      put(b, v.st.col + 1, b.level, "s")
+    end
+    b.level = b.level + 1
+    local next_list = {}
+    for _, v in ipairs(list) do
+      local half = v.L / 2
+      local right = spawn(b, v.st.col + 1)
+      next_list[#next_list + 1] = {st = v.st, a = v.a, L = half}
+      next_list[#next_list + 1] = {st = right, a = v.a + half, L = half}
+    end
+    list = next_list
+  end
+  straight(b, 1)
+end
+
+-- n -> m. When m = m' 2^k with m' >= n, an n -> m' balancer followed by
+-- 1 -> 2^k splitter trees is much smaller than an m-wide core, and still
+-- exact: every input spreads evenly over the m' belts, each of which is
+-- split evenly again.
+local function build(n, m, ug_max)
+  local k, mp = 0, m
+  while mp % 2 == 0 and mp / 2 >= n and mp / 2 >= 2 do mp, k = mp / 2, k + 1 end
+  if k == 0 then return build_core(n, m, ug_max) end
+  local b = build_core(n, mp, ug_max)
+  trees(b, k)
   return b
 end
 

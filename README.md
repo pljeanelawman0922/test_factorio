@@ -68,7 +68,10 @@ reads a blueprint book, turns every "N to M" blueprint into a template and
 keeps only the ones the simulator proves balanced (also with inputs left
 empty; designs balanced only with every input in use are marked `exact`
 and used only for that count). The planner picks among all matching
-designs by size and route length.
+designs by size and route length: first the designs with the fewest
+inputs, then ones with spare inputs, then a generated design. Designs
+whose undergrounds are longer than the chosen belt tier reaches are never
+used.
 
 Generated designs (`scripts/generator.lua`), used when nothing else matches:
 
@@ -81,6 +84,9 @@ Generated designs (`scripts/generator.lua`), used when nothing else matches:
   again, so they end up evenly on the real outputs.
 * **More inputs than outputs:** inputs are first merged in groups (sizes
   differ by at most one) down to the output count.
+* **Outputs a multiple of a smaller count:** for M = M' × 2^k with M' ≥ N,
+  an N → M' balancer is followed by 1 → 2^k splitter trees (3 → 12 is a
+  3 → 3 plus three 1 → 4 trees, 13 × 18).
 
 Rough sizes (width × length, yellow undergrounds): 4 → 3: 7 × 11,
 6 → 6: 11 × 20, 8 → 8: 9 × 18, 16 → 16: 24 × 38. The selection needs a few
