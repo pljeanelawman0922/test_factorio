@@ -435,6 +435,8 @@ local function heap_pop(h)
 end
 
 local TURN_COST = 0.6
+-- per input port of a design left unused (prefer 2 -> 4 over 4 -> 4 for 2 inputs)
+local UNUSED_PORT_COST = 10
 -- extra cost of an underground pair over plain belts on the same tiles
 local UG_COST = 1.5
 -- extra cost of replacing an input end / output start belt by an underground
@@ -1030,6 +1032,8 @@ plan_for = function(world, inputs, outputs)
                 local qcx, qcy = var.out_cx + ox, var.out_cy + oy
                 local clear = 0
                 for _, t in ipairs(var.tiles) do clear = clear + clear_at(key(t[1] + ox, t[2] + oy)) end
+                -- a design with spare inputs builds splitters nothing flows through
+                clear = clear + (#var.inputs - n) * UNUSED_PORT_COST
                 local h_cost = n * manhattan(icx, icy, pcx, pcy) + m * manhattan(qcx, qcy, ocx, ocy)
                              + (#var.tiles) * 0.3 + (n - dir_votes[var.flow]) * 2 + clear
                 cands[#cands + 1] = {var = var, ox = ox, oy = oy, tpl = tpl, clear = clear,

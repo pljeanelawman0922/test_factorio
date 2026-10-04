@@ -284,6 +284,14 @@ def fixed():
         g[y][6] = '>'
     g[4][1] = '>'
     ok &= run('inside: screenshot 3', rows_of(g), (0, 0, 6, 5), expect=uses_ports(1, 3))
+    # 2 -> 4 from the bug report (inputs left, outputs split top / bottom
+    # right): the 2 -> 4 design, not a 4 -> 4 with two dead inputs
+    g = blank(16, 10)
+    g[4][0] = g[4][1] = '>'
+    g[5][0] = g[5][1] = '>'
+    for y in (0, 1, 8, 9):
+        g[y][14] = g[y][15] = '>'
+    ok &= run('2->4 bug report layout', rows_of(g), (1, 0, 14, 9), expect=uses('2x4'))
     # too small: the refusal names the design size and a selection that works
     g = blank(6, 4)
     for y in (0, 1, 2):
