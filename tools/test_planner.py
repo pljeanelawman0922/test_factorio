@@ -2,8 +2,9 @@
 """End-to-end tests: run scripts/planner.lua (Lua 5.2 via lupa) on synthetic
 worlds, then verify the complete planned layout with the flow simulator.
 
-World maps use the template symbols plus '#' for an obstacle. The selection
-area is given separately; belts outside it are still part of the world.
+World maps use the template symbols plus '#' for an obstacle and 'T' for a
+tree (buildable after clearing). The selection area is given separately;
+belts outside it are still part of the world.
 
 python3 tools/test_planner.py            fixed scenarios + random fuzz
 python3 tools/test_planner.py --show     also print each planned layout
@@ -28,14 +29,15 @@ planner = lua.eval('require("scripts.planner")')
 templates = lua.eval('require("scripts.templates")')
 
 make_world = lua.eval('''
-function(ents, rocks, x1, y1, x2, y2, ug_max)
+function(ents, rocks, x1, y1, x2, y2, ug_max, trees)
   local blocked = {}
   for _, r in ipairs(rocks) do blocked[r[1] .. "," .. r[2]] = true end
+  for _, r in ipairs(trees or {}) do blocked[r[1] .. "," .. r[2]] = 1 end
   return {
     area = {x1 = x1, y1 = y1, x2 = x2, y2 = y2},
     entities = ents,
     ug_spans = {},
-    blocked = function(x, y) return blocked[x .. "," .. y] == true end,
+    blocked = function(x, y) return blocked[x .. "," .. y] or false end,
     templates = require("scripts.templates"),
     ug_max = ug_max or 5,
   }
@@ -56,8 +58,9 @@ def lua_list(items):
     return t
 
 
-def parse_world(rows):
-    """-> (python ents {tile: simdict}, lua entity list, rocks)"""
+def parse_world(rows, trees=None):
+    """-> (python ents {tile: simdict}, lua entity list, rocks); tree tiles
+    are appended to `trees` if given"""
     ents, lents, rocks = {}, [], []
     for y, row in enumerate(rows):
         for x, c in enumerate(row.split()):
@@ -68,14 +71,20 @@ def parse_world(rows):
                                        tiles=lua_list([lua_list([x, y])])))
             elif c == '#':
                 rocks.append(lua_list([x, y]))
+            elif c == 'T':
+                if trees is not None:
+                    trees.append((x, y))
             elif c != '.':
                 raise ValueError(c)
     return ents, lents, rocks
 
 
-def run(name, rows, area, expect_ok=True, lane=None, ug_max=5):
-    ents, lents, rocks = parse_world(rows)
-    world = make_world(lua_list(lents), lua_list(rocks), *area, ug_max)
+def run(name, rows, area, expect_ok=True, lane=None, ug_max=5, expect=None):
+    """expect: optional function(plan, entity list) -> error string or None"""
+    trees = []
+    ents, lents, rocks = parse_world(rows, trees)
+    world = make_world(lua_list(lents), lua_list(rocks), *area, ug_max,
+                       lua_list([lua_list(t) for t in trees]))
     plan, reason = call_plan(world)
     if plan is None:
         r = [reason[i] for i in range(1, len(reason) + 1)]
@@ -97,8 +106,10 @@ def run(name, rows, area, expect_ok=True, lane=None, ug_max=5):
         e = pe[i]
         tiles = [(e.x, e.y)] + ([(e.x2, e.y2)] if e.kind == 'splitter' else [])
         for t in tiles:
-            if t in full:
+            if t in full and not e.replace:
                 errors.append(f'overlap at {t}')
+            if e.replace and t not in ents:
+                errors.append(f'replaces nothing at {t}')
             if not (area[0] <= t[0] <= area[2] and area[1] <= t[1] <= area[3]):
                 errors.append(f'outside area at {t}')
         if e.kind == 'belt':
@@ -109,6 +120,20 @@ def run(name, rows, area, expect_ok=True, lane=None, ug_max=5):
             sid += 1
             full[tiles[0]] = {'kind': 'splitter', 'dir': e.dir, 'half': 'L', 'id': sid}
             full[tiles[1]] = {'kind': 'splitter', 'dir': e.dir, 'half': 'R', 'id': sid}
+    # cleared tiles: exactly the trees under new entities
+    built = set()
+    for i in range(1, len(pe) + 1):
+        e = pe[i]
+        built.add((e.x, e.y))
+        if e.kind == 'splitter':
+            built.add((e.x2, e.y2))
+    cleared = {(plan.clear[i].x, plan.clear[i].y) for i in range(1, len(plan.clear) + 1)}
+    if cleared != built & set(trees):
+        errors.append(f'clear list {sorted(cleared)} != trees under entities {sorted(built & set(trees))}')
+    if expect:
+        err = expect(plan, [pe[i] for i in range(1, len(pe) + 1)])
+        if err:
+            errors.append(err)
     ins = [(plan.inputs[i].x, plan.inputs[i].y) for i in range(1, len(plan.inputs) + 1)]
     outs = [(plan.outputs[i].x, plan.outputs[i].y) for i in range(1, len(plan.outputs) + 1)]
     # remove belts downstream of outputs / upstream of inputs? not needed:
@@ -141,8 +166,8 @@ def draw(full, rows, area):
                     c = UGCH[(e['dir'], e['io'])]
                 else:
                     c = 'S' if e['half'] == 'L' else 's'
-            elif rows[y].split()[x] == '#':
-                c = '#'
+            elif rows[y].split()[x] in '#T':
+                c = rows[y].split()[x]
             inside = area[0] <= x <= area[2] and area[1] <= y <= area[3]
             line.append(c if inside or c != '.' else ' ')
         print('      ' + ' '.join(line))
@@ -203,13 +228,85 @@ def fixed():
     # not enough room
     rows, area = scenario_straight(4, 4, gap=3, w=8)
     ok &= run('too small 4->4', rows, area, expect_ok=False)
+    # generated designs (no hand-drawn template for these counts)
+    for n, m, gap, w in [(4, 3, 16, 14), (6, 6, 24, 18), (8, 8, 24, 18), (6, 2, 18, 14),
+                         (3, 7, 26, 20), (8, 1, 14, 14), (5, 5, 28, 20)]:
+        rows, area = scenario_straight(n, m, gap=gap, w=w)
+        ok &= run(f'generated {n}->{m}', rows, area, expect=uses('generated'))
     # unsupported count
-    rows, area = scenario_straight(4, 3, gap=10)
-    ok &= run('unsupported 4->3', rows, area, expect_ok=False)
+    rows, area = scenario_straight(17, 2, gap=10, w=20)
+    ok &= run('unsupported 17->2', rows, area, expect_ok=False)
+
+    # a belt line crosses the gap: routes must go under it
+    rows, area = scenario_straight(2, 2, gap=10)
+    g = [r.split() for r in rows]
+    for x in range(len(g[0])):
+        g[4][x] = '>'
+    area = (1, area[1], area[2] - 1, area[3])  # the line comes from and goes outside
+    ok &= run('crossing line 2->2', rows_of(g), area, expect=uses_ug)
+    rows, area = scenario_straight(4, 4, gap=14, w=14)
+    g = [r.split() for r in rows]
+    for x in range(len(g[0])):
+        g[3][x] = '<'
+        g[12][x] = '>'
+    area = (1, area[1], area[2] - 1, area[3])
+    ok &= run('two crossing lines 4->4', rows_of(g), area, expect=uses_ug)
+
+    # output starts right behind a belt line, packed side by side: the
+    # middle ones can only be fed by turning the start into an underground exit
+    rows, area = scenario_straight(4, 4, gap=14, w=14, out_off=5)
+    g = [r.split() for r in rows]
+    for x in range(len(g[0])):
+        g[15][x] = '>'
+    area = (1, area[1], area[2] - 1, area[3])
+    ok &= run('outputs behind line 4->4', rows_of(g), area, expect=replaces('out'))
+
+    # rocks right in front of the input ends: the inputs become entrances
+    rows, area = scenario_straight(2, 2, gap=10)
+    g = [r.split() for r in rows]
+    for x in range(len(g[0])):
+        g[2][x] = '#'
+    ok &= run('rock wall at inputs 2->2', rows_of(g), area, expect=replaces('in'))
+
+    # trees: built over (and marked for clearing) only where needed
+    rows, area = scenario_straight(3, 3, gap=14)
+    g = [r.split() for r in rows]
+    for y in range(4, 13):
+        for x in range(len(g[0])):
+            if (x * 7 + y * 3) % 4 == 0:
+                g[y][x] = 'T'
+    ok &= run('trees 3->3', rows_of(g), area)
+    rows, area = scenario_straight(2, 2, gap=8, w=6)
+    g = [r.split() for r in rows]
+    for y in range(3, 9):
+        for x in range(len(g[0])):
+            g[y][x] = 'T'
+    ok &= run('forest 2->2', rows_of(g), area)
     # weak underground tier cannot fit the 4x4 crossing (needs 2)
     rows, area = scenario_straight(4, 4)
     ok &= run('ug range 1', rows, area, expect_ok=False, ug_max=1)
     return ok
+
+
+def uses(name):
+    def f(plan, ents):
+        return None if plan.template.name == name else f'expected template {name}, got {plan.template.name}'
+    return f
+
+
+def uses_ug(plan, ents):
+    if not any(e.kind == 'ug' and e.route for e in ents):
+        return 'expected routes with undergrounds'
+    return None
+
+
+def replaces(io):
+    def f(plan, ents):
+        if not any(e.replace and e.io == io for e in ents):
+            return f'expected a replaced {"input end" if io == "in" else "output start"}'
+        bad = [e for e in ents if e.replace and not (e.kind == 'ug' and e.io == io)]
+        return 'replaced with wrong kind' if bad else None
+    return f
 
 
 def fuzz(seed, count):
@@ -268,8 +365,45 @@ def fuzz(seed, count):
     return ok
 
 
+def fuzz_big(seed, count):
+    """more belts (up to 8 each way) and belt lines crossing the gap"""
+    rnd = random.Random(seed)
+    ok = True
+    made = 0
+    for k in range(count):
+        n, m = rnd.randint(1, 8), rnd.randint(1, 8)
+        w = max(n, m) + rnd.randint(4, 10)
+        h = rnd.randint(14, 32)
+        g = blank(w, h)
+        for x in sorted(rnd.sample(range(1, w - 1), n)):
+            g[0][x] = g[1][x] = 'v'
+        for x in sorted(rnd.sample(range(1, w - 1), m)):
+            g[h - 2][x] = g[h - 1][x] = 'v'
+        # lines come from and leave past the selection's sides
+        for y in rnd.sample(range(3, h - 3), rnd.randint(0, 2)):
+            for x in range(w):
+                g[y][x] = rnd.choice('<>') if x == 0 else g[y][0]
+        for _ in range(rnd.randint(0, (w * h) // 25)):
+            x, y = rnd.randrange(w), rnd.randrange(3, h - 3)
+            if g[y][x] == '.':
+                g[y][x] = rnd.choice('#T')
+        rows, area = rows_of(g), (1, 1, w - 2, h - 2)
+        trees = []
+        ents, lents, rocks = parse_world(rows, trees)
+        world = make_world(lua_list(lents), lua_list(rocks), *area, 5,
+                           lua_list([lua_list(t) for t in trees]))
+        plan, reason = call_plan(world)
+        if plan is None:
+            continue
+        made += 1
+        ok &= run(f'fuzz-big#{k} {n}->{m} {w}x{h}', rows, area)
+    print(f'fuzz-big: {made} planned layouts verified')
+    return ok
+
+
 if __name__ == '__main__':
     good = fixed()
     good &= fuzz(1234, 150)
+    good &= fuzz_big(99, 60)
     print('ALL PLANNER TESTS OK' if good else 'PLANNER TESTS FAILED')
     sys.exit(0 if good else 1)

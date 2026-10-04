@@ -1,9 +1,9 @@
 {
   "name": "lane-belt-balancer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "title": "Belt Balancer Planner",
   "author": "lane-belt-balancer",
   "factorio_version": "2.1",
   "dependencies": ["base >= 2.1.0"],
-  "description": "Select a gap between input belt ends and output belt starts; the mod picks a belt or lane balancer that fits, routes the belts to it and places ghosts. Supports 1-4 inputs to 1-4 outputs (except 4 to 3) and a 1 to 1 lane balancer."
+  "description": "Select a gap between input belt ends and output belt starts; the mod picks or generates a balancer that fits (1-16 inputs to 1-16 outputs, plus a 1 to 1 lane balancer), routes the belts to it (with undergrounds where needed), marks trees, rocks and cliffs in the way for removal and places ghosts."
 }

@@ -16,7 +16,6 @@ Usage: python3 tools/sim.py         -> verifies every template
 """
 import os
 import sys
-from fractions import Fraction
 
 DIRS = [(0, -1), (1, 0), (0, 1), (-1, 0)]  # N E S W, y grows south
 SYM = {'^': 0, '>': 1, 'v': 2, '<': 3}
@@ -217,14 +216,15 @@ def solve(ents, sources, sinks, inject):
         v = edges.get(n, [])
         if isinstance(v, tuple):
             outs = [m for m in split_out[(v[1], v[2])] if m in live]
-            return [(m, Fraction(1, len(outs))) for m in outs] if outs else []
-        return [(m, Fraction(w)) for m, w in v]
+            return [(m, 1.0 / len(outs)) for m in outs] if outs else []
+        return [(m, float(w)) for m, w in v]
 
-    mass = {n: Fraction(a) for n, a in inject.items()}
+    # floats: loop-backs converge geometrically, exact fractions would blow up
+    mass = {n: float(a) for n, a in inject.items()}
     absorbed = {}
-    stuck = Fraction(0)
-    for _ in range(400):
-        if not mass:
+    stuck = 0.0
+    for _ in range(200000):
+        if not mass or sum(mass.values()) < 1e-13:
             break
         new = {}
         for n, a in mass.items():
@@ -238,8 +238,8 @@ def solve(ents, sources, sinks, inject):
             for m, w in oe:
                 new[m] = new.get(m, 0) + a * w
         mass = new
-    residual = sum(mass.values(), Fraction(0))
-    res = {s: [Fraction(0), Fraction(0)] for s in sinks}
+    residual = sum(mass.values(), 0.0)
+    res = {s: [0.0, 0.0] for s in sinks}
     for (t, lane), a in absorbed.items():
         res[t][lane] += a
     return res, stuck, residual, errors
@@ -258,7 +258,7 @@ def check_balancer(ents, inputs, outputs, lane_balance, label, quiet=False):
                 ok = False
                 msgs.extend(sorted(set(errors)))
             # loops converge geometrically: allow a tiny residual
-            if stuck != 0 or residual > Fraction(1, 10**6):
+            if stuck > 1e-9 or residual > 1e-6:
                 ok = False
                 msgs.append(f'input {i} lane {lane}: stuck={float(stuck):.4f} residual={float(residual):.2e}')
             for o in outputs:

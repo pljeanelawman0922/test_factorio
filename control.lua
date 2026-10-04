@@ -13,6 +13,11 @@ for k, v in pairs(TO_DEF) do FROM_DEF[v] = k end
 
 local KIND = {["transport-belt"] = "belt", ["underground-belt"] = "ug", ["splitter"] = "splitter"}
 
+-- things in the way that are marked for deconstruction, with the planner's
+-- extra cost of building there
+local CLEAR_COST = {["tree"] = 1, ["simple-entity"] = 2, ["cliff"] = 6}
+local CLEAR_TYPES = {"tree", "simple-entity", "cliff"}
+
 local function init_storage()
   storage.builds = storage.builds or {}
 end
@@ -28,6 +33,19 @@ local function tell(player, msg, ok)
 end
 
 local function tile_of(pos) return {math.floor(pos.x), math.floor(pos.y)} end
+
+local function tile_box(x, y) return {{x + 0.02, y + 0.02}, {x + 0.98, y + 0.98}} end
+
+-- Can this force blow up the cliff (cliff explosives available)?
+local function cliff_removable(force, cliff)
+  local ok, res = pcall(function()
+    local item = cliff.prototype.cliff_explosive_prototype
+    if not item then return false end
+    local recipe = force.recipes[item]
+    return recipe == nil or recipe.enabled
+  end)
+  return ok and res or false
+end
 
 -- Real entity or ghost -> (type, name, prototype)
 local function identity(e)
@@ -156,6 +174,51 @@ local function remove_ghosts(list)
   return n
 end
 
+-- build = {ghosts = {...}, marked = {...}, removed = {...}}
+-- (older saves: a plain ghost list)
+local function ghosts_of(build)
+  if not build then return {} end
+  return build.ghosts or build
+end
+
+-- Undo what a build did besides placing ghosts: deconstruction marks, and
+-- belt ghosts it replaced by underground ghosts.
+local function cancel_marks(build, force, player)
+  for _, e in ipairs((build and build.marked) or {}) do
+    if e.valid and e.to_be_deconstructed() then e.cancel_deconstruction(force) end
+  end
+  for _, g in ipairs((build and build.removed) or {}) do
+    if g.surface.valid then
+      g.surface.create_entity{name = "entity-ghost", inner_name = g.name, position = g.position,
+                              direction = g.direction, force = force, player = player}
+    end
+  end
+end
+
+-- World test for the planner: false = free, true = can't build, a number =
+-- can build once trees / rocks / cliffs are removed (that is the extra cost).
+local function make_blocked(surface, force, belt)
+  return function(x, y)
+    local params = {name = belt, position = {x + 0.5, y + 0.5}, direction = D.north, force = force,
+                    build_check_type = defines.build_check_type.manual_ghost}
+    if surface.can_place_entity(params) then return false end
+    -- would it fit if everything that can be deconstructed were gone?
+    params.forced = true
+    if not surface.can_place_entity(params) then return true end
+    local cost = 0
+    for _, e in ipairs(surface.find_entities_filtered{area = tile_box(x, y)}) do
+      local c = CLEAR_COST[e.type]
+      if c then
+        if e.type == "cliff" and not cliff_removable(force, e) then return true end
+        if c > cost then cost = c end
+      elseif e.force == force and e.type ~= "entity-ghost" and e.type ~= "character" then
+        return true -- never tear down the player's own buildings
+      end
+    end
+    return cost > 0 and cost or true
+  end
+end
+
 local function on_select(event)
   local player = game.get_player(event.player_index)
   if not player then return end
@@ -193,12 +256,7 @@ local function on_select(event)
   end
   world.ug_max = tier.ug_max
   world._occ = nil -- planner.plan re-indexes
-  world.blocked = function(x, y)
-    return not surface.can_place_entity{
-      name = tier.belt, position = {x + 0.5, y + 0.5}, direction = D.north, force = force,
-      build_check_type = defines.build_check_type.manual_ghost,
-    }
-  end
+  world.blocked = make_blocked(surface, force, tier.belt)
 
   local plan, reason = planner.plan(world)
   if not plan then
@@ -206,8 +264,40 @@ local function on_select(event)
     return
   end
 
+  -- input ends / output starts the routes turn into undergrounds
+  local belt_at = {}
+  for _, r in ipairs(entities) do
+    if r.kind == "belt" then belt_at[r.tiles[1][1] .. "," .. r.tiles[1][2]] = r.entity end
+  end
+  local created, marked, removed = {}, {}, {}
+  local function rollback()
+    remove_ghosts(created)
+    cancel_marks({marked = marked, removed = removed}, force, player)
+  end
+  for _, e in ipairs(plan.entities) do
+    if e.replace then
+      local old = belt_at[e.x .. "," .. e.y]
+      if old and old.valid then
+        if old.type == "entity-ghost" then
+          removed[#removed + 1] = {surface = surface, name = old.ghost_name, position = old.position,
+                                   direction = old.direction}
+          old.destroy()
+        elseif old.order_deconstruction(force, player) then
+          marked[#marked + 1] = old
+        end
+      end
+    end
+  end
+  -- trees, rocks and cliffs under the new entities
+  for _, t in ipairs(plan.clear or {}) do
+    for _, c in ipairs(surface.find_entities_filtered{area = tile_box(t.x, t.y), type = CLEAR_TYPES}) do
+      if c.valid and not c.to_be_deconstructed() and c.order_deconstruction(force, player) then
+        marked[#marked + 1] = c
+      end
+    end
+  end
+
   -- place ghosts; roll back if anything fails
-  local created = {}
   for _, e in ipairs(plan.entities) do
     local params = {name = "entity-ghost", force = force, player = player,
                     direction = TO_DEF[e.dir], raise_built = true}
@@ -224,7 +314,7 @@ local function on_select(event)
     end
     local ghost = surface.create_entity(params)
     if not (ghost and ghost.valid) then
-      remove_ghosts(created)
+      rollback()
       tell(player, {"lbb.place-failed", e.x, e.y}, false)
       return
     end
@@ -232,8 +322,13 @@ local function on_select(event)
     created[#created + 1] = ghost
   end
 
-  storage.builds[player.index] = created
-  tell(player, {"lbb.placed", {"lbb-template." .. plan.template.name}, plan.n_in, plan.n_out, #created}, true)
+  storage.builds[player.index] = {ghosts = created, marked = marked, removed = removed}
+  local tname = {"lbb-template." .. plan.template.name}
+  if #marked > 0 then
+    tell(player, {"lbb.placed-clear", tname, plan.n_in, plan.n_out, #created, #marked}, true)
+  else
+    tell(player, {"lbb.placed", tname, plan.n_in, plan.n_out, #created}, true)
+  end
 end
 
 local function on_alt_select(event)
@@ -244,6 +339,16 @@ local function on_alt_select(event)
     if e.valid and e.type == "entity-ghost" and e.tags and e.tags[TAG] then list[#list + 1] = e end
   end
   local n = remove_ghosts(list)
+  -- once every ghost of the last build is gone, also drop its deconstruction marks
+  local build = storage.builds[player.index]
+  if build then
+    local left = false
+    for _, g in ipairs(ghosts_of(build)) do if g.valid then left = true; break end end
+    if not left then
+      cancel_marks(build, player.force, player)
+      storage.builds[player.index] = nil
+    end
+  end
   tell(player, {"lbb.removed", n}, true)
 end
 
@@ -258,7 +363,9 @@ end)
 script.on_event("lbb-remove-last", function(event)
   local player = game.get_player(event.player_index)
   if not player then return end
-  local n = remove_ghosts(storage.builds[player.index])
+  local build = storage.builds[player.index]
+  local n = remove_ghosts(ghosts_of(build))
+  cancel_marks(build, player.force, player)
   storage.builds[player.index] = nil
   tell(player, {"lbb.removed", n}, true)
 end)

@@ -2,7 +2,8 @@
 
 Drag over the gap between where your input belts end and your output belts
 begin. The mod finds a balancer that fits in the selection, routes the belts
-to it, and places ghosts for your robots (or you) to build.
+to it (going underground where it has to), marks trees, rocks and cliffs in
+the way for removal, and places ghosts for your robots (or you) to build.
 
 ## Using it
 
@@ -27,6 +28,9 @@ by belt speed.
 
 ## What it can build
 
+Any count from 1 to 16 inputs and 1 to 16 outputs, as long as the design fits
+in the selection.
+
 | Inputs → outputs | Design used |
 |---|---|
 | 1 → 1 | lane balancer (also evens out the two lanes) |
@@ -36,17 +40,34 @@ by belt speed.
 | 1 → 3, 2 → 3, 3 → 3 | 3 → 3 (4 → 4 with a loop-back) |
 | 1 → 4, 2 → 4 | 2 → 4 |
 | 3 → 4, 4 → 4 | 4 → 4 |
+| anything else up to 16 → 16 | generated (see below) |
 
-Not supported yet: 4 → 3 and anything above 4 belts. Belt balancers keep
-lanes separate (left lanes are balanced among themselves, right lanes among
-themselves), as splitters do in the game. The 4 → 2, 4 → 4 and 3 → 3 designs
-are throughput limited: they balance exactly, but under some uneven loads
-they move less than the full input.
+Generated designs (`scripts/generator.lua`):
+
+* **Core:** a P × P butterfly balancer, P = 2, 4, 8 or 16 (the smallest that
+  has at least as many outputs as needed): log2(P) splitter layers; between
+  layers the belts are re-arranged with undergrounds so every splitter gets
+  one belt from each half.
+* **Fewer outputs than P** (3, 5, 6, 7, 9 to 15): the spare outputs loop back
+  around the sides into spare inputs. Items that go round a loop are spread
+  again, so they end up evenly on the real outputs.
+* **More inputs than outputs:** inputs are first merged in groups (sizes
+  differ by at most one) down to the output count.
+
+Rough sizes (width × length, yellow undergrounds): 4 → 3: 7 × 11,
+6 → 6: 11 × 20, 8 → 8: 9 × 18, 16 → 16: 24 × 38. The selection needs a few
+more tiles than that for the belts to reach the balancer.
+
+Belt balancers keep lanes separate (left lanes are balanced among
+themselves, right lanes among themselves), as splitters do in the game. The 4 → 2, 4 → 4, 3 → 3 and
+generated designs are throughput limited: they balance exactly, but under
+some uneven loads they move less than the full input. Merged inputs are not
+drawn evenly when the outputs back up.
 
 ## How it works
 
 ```
-selection ─▶ detect ends ─▶ pick designs ─▶ try placements ─▶ route belts ─▶ ghosts
+selection ─▶ detect ends ─▶ pick / generate design ─▶ try placements ─▶ route belts ─▶ clear + ghosts
 ```
 
 1. **Detect.** Every belt or underground exit in the selection that points
@@ -57,6 +78,7 @@ selection ─▶ detect ends ─▶ pick designs ─▶ try placements ─▶ ro
 2. **Pick designs.** Designs are ASCII templates (`scripts/templates.lua`)
    with an exact output count and a maximum input count. A true balancer
    stays balanced when some inputs are empty, so a 4 → 4 also serves 3 → 4.
+   Counts without a hand-drawn template get a generated one.
 3. **Try placements.** Each design is tried in all 4 rotations and both
    mirror images at every offset inside the selection. A placement is kept if
    every tile is buildable (the game's own ghost placement check), nothing
@@ -69,8 +91,21 @@ selection ─▶ detect ends ─▶ pick designs ─▶ try placements ─▶ ro
    congestion: routes may share tiles at a price that rises every round, and
    are ripped up and re-routed until no tile is shared. Routes never use a
    tile that some other belt pushes into, so nothing side-loads by accident.
-5. **Build.** The cheapest successful layout is placed as ghosts. If any
-   ghost fails to place, the whole layout is rolled back.
+   Plain belts are tried first; if that fails, routes may also use
+   underground belts to pass under other belts, splitters, rocks or water.
+   An underground pair claims its whole line, so it never pairs with another
+   underground (existing, the balancer's own, or another route's). To get
+   out or in, a route may turn an input end, an output start or a balancer
+   port into an underground of the same direction (the input belt must be
+   fed straight from behind).
+5. **Clear.** Tiles with trees, rocks or cliffs count as buildable at an
+   extra cost (cliffs only with cliff explosives researched). Whatever the
+   chosen layout covers is marked for deconstruction; nothing of yours is
+   ever marked, except input/output belts replaced by undergrounds.
+6. **Build.** The cheapest successful layout is placed as ghosts. If any
+   ghost fails to place, the whole layout is rolled back, including the
+   deconstruction marks. Shift + Alt + B (and Shift + drag over the whole
+   build) also cancel the marks.
 
 The planner (`scripts/planner.lua`) is pure Lua with no game API calls, so it
 is tested outside the game. Planning is deterministic (safe in multiplayer)
@@ -80,11 +115,13 @@ and capped by a work budget so a hopeless selection gives up quickly.
 
 ```
 info.json, data.lua, settings.lua   prototypes: tool, shortcut, hotkeys, settings
-control.lua                         events, world scan, tier choice, ghost placement
+control.lua                         events, world scan, tier choice, clearing, ghost placement
 scripts/planner.lua                 detection, placement search, routing
-scripts/templates.lua               balancer designs
+scripts/templates.lua               hand-drawn balancer designs
+scripts/generator.lua               balancer designs for any count up to 16 → 16
 locale/en, locale/ru                English and Russian text
 tools/sim.py                        lane-level belt flow simulator, verifies templates
+tools/test_generator.py             every generated design, verified by the simulator
 tools/test_planner.py               planner tests + random fuzzing, verified by the simulator
 tools/test_control.py               control.lua against a mock of the game API
 ```
@@ -104,9 +141,10 @@ e / E     underground entrance / exit facing east (w / W: west)
 Then run the checks (needs Python 3 and `pip install lupa`):
 
 ```
-python3 tools/sim.py            # proves every design balances, also with inputs left empty
-python3 tools/test_planner.py   # placement + routing, every planned layout re-verified
-python3 tools/test_control.py   # control.lua against a mock game API
+python3 tools/sim.py              # proves every design balances, also with inputs left empty
+python3 tools/test_generator.py   # every generated design 1..8 → 1..8 (--all: up to 16)
+python3 tools/test_planner.py     # placement + routing, every planned layout re-verified
+python3 tools/test_control.py     # control.lua against a mock game API
 ```
 
 The simulator models straight belts, curves, side-loading, splitters
@@ -115,11 +153,12 @@ if any input lane does not reach every output equally.
 
 ## Known limitations
 
-* Routes are plain belts; they don't use undergrounds to cross other belts.
-  If belts must cross to reach the balancer, give the selection more room or
-  move the belt ends.
-* Trees and rocks in the way are not marked for deconstruction; clear them
-  first.
+* The balancer itself can't straddle an existing belt; routes can go under
+  belts, the balancer can't. Leave a clear stretch at least as long as the
+  design.
+* 3, 5, 6, 7 and 9 to 15 outputs need loop-backs, which make those designs
+  longer and wider than the belt bundle. 3 → 3 needs a gap of about 12 tiles,
+  6 → 6 about 12 × 22.
 * Undo (Ctrl + Z) doesn't cover the placed ghosts; use Shift + drag or
   Shift + Alt + B.
 * Selections are limited to 64 × 64 tiles.
