@@ -1,0 +1,10 @@
+---------------------------------------------------------------------------------------------------
+Version: 0.1.0
+Date: 2026-10-04
+  Features:
+    - Selection tool that plans a belt balancer between input belt ends and output belt starts and places ghosts.
+    - Designs for 1-4 inputs to 1-4 outputs (except 4 to 3) and a 1 to 1 lane balancer.
+    - Belt routing around obstacles with negotiated-congestion A*.
+    - Shift + drag removes planned ghosts; Shift + Alt + B removes the last planned balancer.
+  Locale:
+    - English and Russian.
