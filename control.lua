@@ -1,7 +1,7 @@
 -- Belt Balancer Planner: runtime glue between Factorio and scripts/planner.lua
 
 local planner = require("scripts.planner")
-local templates = require("scripts.templates")
+local templates = require("scripts.all_templates")
 
 local TOOL = "lbb-balancer-tool"
 local TAG = "lbb"
@@ -20,6 +20,8 @@ local CLEAR_TYPES = {"tree", "simple-entity", "cliff"}
 
 local function init_storage()
   storage.builds = storage.builds or {}
+  -- planning in progress, per player: spread over ticks (see on_tick)
+  storage.jobs = storage.jobs or {}
 end
 script.on_init(init_storage)
 script.on_configuration_changed(init_storage)
@@ -219,6 +221,8 @@ local function make_blocked(surface, force, belt)
   end
 end
 
+local run_job, place_plan
+
 local function on_select(event)
   local player = game.get_player(event.player_index)
   if not player then return end
@@ -255,16 +259,22 @@ local function on_select(event)
     return
   end
   world.ug_max = tier.ug_max
-  world._occ = nil -- planner.plan re-indexes
-  world.blocked = make_blocked(surface, force, tier.belt)
+  world._occ = nil -- planner.start re-indexes
 
-  local plan, reason, hint = planner.plan(world)
-  if not plan then
-    if hint then reason = {"", reason, " ", {"lbb.try-size", hint[1], hint[2], hint[3]}} end
+  local P, reason = planner.start(world)
+  if not P then
     tell(player, reason, false)
     return
   end
+  -- a new selection replaces one still being planned
+  storage.jobs[player.index] = {P = P, surface = surface, force = force, tier = tier,
+                                entities = entities, started = game.tick}
+  run_job(player.index)
+end
 
+-- Places a finished plan as ghosts (plus deconstruction marks).
+place_plan = function(player, job, plan)
+  local surface, force, tier, entities = job.surface, job.force, job.tier, job.entities
   -- input ends / output starts the routes turn into undergrounds
   local belt_at = {}
   for _, r in ipairs(entities) do
@@ -331,6 +341,43 @@ local function on_select(event)
     tell(player, {"lbb.placed", tname, plan.n_in, plan.n_out, #created}, true)
   end
 end
+
+-- Advances player `idx`'s planning by one slice of work. Small plans
+-- finish in the tick they were started.
+run_job = function(idx)
+  local job = storage.jobs[idx]
+  if not job then return end
+  local player = game.get_player(idx)
+  if not (player and player.valid and job.surface.valid) then
+    storage.jobs[idx] = nil
+    return
+  end
+  local budget = settings.global["lbb-work-per-tick"].value
+  local blocked = make_blocked(job.surface, job.force, job.tier.belt)
+  local res, reason, hint = planner.step(job.P, budget, blocked)
+  if res == nil then
+    if not job.told then
+      job.told = true
+      player.create_local_flying_text{text = {"lbb.planning"}, create_at_cursor = true}
+    end
+    return
+  end
+  storage.jobs[idx] = nil
+  if res then
+    place_plan(player, job, res)
+  else
+    if hint then reason = {"", reason, " ", {"lbb.try-size", hint[1], hint[2], hint[3]}} end
+    tell(player, reason, false)
+  end
+end
+
+script.on_event(defines.events.on_tick, function()
+  if not next(storage.jobs) then return end
+  local ids = {}
+  for idx in pairs(storage.jobs) do ids[#ids + 1] = idx end
+  table.sort(ids)
+  for _, idx in ipairs(ids) do run_job(idx) end
+end)
 
 local function on_alt_select(event)
   local player = game.get_player(event.player_index)

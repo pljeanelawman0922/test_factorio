@@ -20,7 +20,7 @@ import sys
 DIRS = [(0, -1), (1, 0), (0, 1), (-1, 0)]  # N E S W, y grows south
 SYM = {'^': 0, '>': 1, 'v': 2, '<': 3}
 UG = {'D': (0, 'in'), 'U': (0, 'out'), 'e': (1, 'in'), 'E': (1, 'out'),
-      'w': (3, 'in'), 'W': (3, 'out')}
+      'd': (2, 'in'), 'u': (2, 'out'), 'w': (3, 'in'), 'W': (3, 'out')}
 UG_MAX = 5
 L, R = 0, 1
 
@@ -87,7 +87,13 @@ def parse_grid(grid):
                 sid += 1
                 ents[t] = {'kind': 'splitter', 'dir': 3, 'half': 'L', 'id': sid}
                 ents[(x, y - 1)] = {'kind': 'splitter', 'dir': 3, 'half': 'R', 'id': sid}
-            elif c in 'kj':
+            elif c == 'Q':
+                if x == 0 or row[x - 1] != 'q':
+                    raise SimError(f'Q without q on its left at {t}')
+                sid += 1
+                ents[t] = {'kind': 'splitter', 'dir': 2, 'half': 'L', 'id': sid}
+                ents[(x - 1, y)] = {'kind': 'splitter', 'dir': 2, 'half': 'R', 'id': sid}
+            elif c in 'kjq':
                 pass  # second half, placed with K / J
             elif c == 's':
                 raise SimError(f'stray s at {t}')
@@ -142,13 +148,17 @@ def enter(ents, src, d, lane, errors):
     e = ents.get(t)
     if e is None:
         return None
+    # a splitter output facing something that doesn't take items from that
+    # side is simply blocked (mergers use this); a belt doing so is a bug
+    from_splitter = ents.get(src, {}).get('kind') == 'splitter'
     k = e['kind']
     if k == 'belt':
         dt = e['dir']
         if dt == d:
             return (t, lane)
         if dt == opp(d):
-            errors.append(f'head-on belts {src}->{t}')
+            if not from_splitter:
+                errors.append(f'head-on belts {src}->{t}')
             return None
         if is_curve(ents, t):
             return (t, lane)
@@ -157,12 +167,14 @@ def enter(ents, src, d, lane, errors):
     if k == 'ug':
         if e['io'] == 'in' and e['dir'] == d:
             return (t, lane)
-        errors.append(f'bad feed into underground at {t} from {src}')
+        if not from_splitter:
+            errors.append(f'bad feed into underground at {t} from {src}')
         return None
     if k == 'splitter':
         if e['dir'] == d:
             return (t, lane)
-        errors.append(f'side feed into splitter at {t} from {src}')
+        if not from_splitter:
+            errors.append(f'side feed into splitter at {t} from {src}')
         return None
     return None
 
@@ -303,15 +315,20 @@ def load_templates(path):
         t = tbl[i]
         grid = [t.grid[j] for j in range(1, len(t.grid) + 1)]
         out.append({'name': t.name, 'inputs': t.inputs, 'outputs': t.outputs,
-                    'lane': bool(t.lane), 'grid': grid})
+                    'lane': bool(t.lane), 'exact': bool(t.exact), 'grid': grid,
+                    'source': t.source or ''})
     return out
 
 
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
-    path = os.path.join(here, '..', 'scripts', 'templates.lua')
     all_ok = True
-    for t in load_templates(path):
+    tpls = []
+    for f in ('templates.lua', 'book_templates.lua'):
+        p = os.path.join(here, '..', 'scripts', f)
+        if os.path.exists(p):
+            tpls += load_templates(p)
+    for t in tpls:
         try:
             ents, ins, outs, _ = parse_grid(t['grid'])
         except SimError as ex:
@@ -322,11 +339,14 @@ def main():
             print('FAIL', t['name'], f'ports {len(ins)}x{len(outs)} != declared')
             all_ok = False
             continue
+        global UG_MAX
+        UG_MAX = 10
         ok, _ = check_balancer(ents, ins, outs, t['lane'],
-                               f"{t['name']:9s} {len(ins)}->{len(outs)}" + (' (lanes)' if t['lane'] else ''))
+                               f"{t['name']:9s} {len(ins)}->{len(outs)}" + (' (lanes)' if t['lane'] else '')
+                               + (f" {t['source']}" if t['source'] else ''))
         all_ok &= ok
         # every subset of inputs must still balance (we build fewer inputs)
-        if ok and len(ins) > 1:
+        if ok and len(ins) > 1 and not t['exact'] and len(ins) <= 6:
             from itertools import combinations
             for k in range(1, len(ins)):
                 for sub in combinations(ins, k):

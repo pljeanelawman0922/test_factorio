@@ -26,10 +26,11 @@ UGCH = {(0, 'in'): 'D', (0, 'out'): 'U', (1, 'in'): 'e', (1, 'out'): 'E',
 lua = lua52.LuaRuntime(unpack_returned_tuples=True)
 lua.execute(f'package.path = "{ROOT}/?.lua;" .. package.path')
 planner = lua.eval('require("scripts.planner")')
+lua.execute('planner_mod = require("scripts.planner")')
 templates = lua.eval('require("scripts.templates")')
 
 make_world = lua.eval('''
-function(ents, rocks, x1, y1, x2, y2, ug_max, trees)
+function(ents, rocks, x1, y1, x2, y2, ug_max, trees, hand_only)
   local blocked = {}
   for _, r in ipairs(rocks) do blocked[r[1] .. "," .. r[2]] = true end
   for _, r in ipairs(trees or {}) do blocked[r[1] .. "," .. r[2]] = 1 end
@@ -38,7 +39,7 @@ function(ents, rocks, x1, y1, x2, y2, ug_max, trees)
     entities = ents,
     ug_spans = {},
     blocked = function(x, y) return blocked[x .. "," .. y] or false end,
-    templates = require("scripts.templates"),
+    templates = hand_only and require("scripts.templates") or require("scripts.all_templates"),
     ug_max = ug_max or 5,
   }
 end''')
@@ -79,12 +80,13 @@ def parse_world(rows, trees=None):
     return ents, lents, rocks
 
 
-def run(name, rows, area, expect_ok=True, lane=None, ug_max=5, expect=None):
-    """expect: optional function(plan, entity list) -> error string or None"""
+def run(name, rows, area, expect_ok=True, lane=None, ug_max=5, expect=None, hand_only=False):
+    """expect: optional function(plan, entity list) -> error string or None
+    hand_only: plan with the hand-drawn templates only (no imported book)"""
     trees = []
     ents, lents, rocks = parse_world(rows, trees)
     world = make_world(lua_list(lents), lua_list(rocks), *area, ug_max,
-                       lua_list([lua_list(t) for t in trees]))
+                       lua_list([lua_list(t) for t in trees]), hand_only)
     plan, reason = call_plan(world)
     if plan is None:
         r = [reason[i] for i in range(1, len(reason) + 1)]
@@ -232,7 +234,7 @@ def fixed():
     for n, m, gap, w in [(4, 3, 16, 14), (6, 6, 24, 18), (8, 8, 24, 18), (6, 2, 18, 14),
                          (3, 7, 26, 20), (8, 1, 14, 14), (5, 5, 28, 20)]:
         rows, area = scenario_straight(n, m, gap=gap, w=w)
-        ok &= run(f'generated {n}->{m}', rows, area, expect=uses('generated'))
+        ok &= run(f'generated {n}->{m}', rows, area, expect=uses('generated'), hand_only=True)
     # unsupported count
     rows, area = scenario_straight(17, 2, gap=10, w=20)
     ok &= run('unsupported 17->2', rows, area, expect_ok=False)
@@ -324,11 +326,11 @@ def fixed():
         g[y][15] = '>'
     g[5][0] = '>'
     ok &= check_detect('inside: screenshot 2', rows_of(g), (0, 0, 15, 8), [(0, 5)], [(15, 0), (15, 4), (15, 8)])
-    ok &= run('inside: screenshot 2', rows_of(g), (0, 0, 15, 8), expect=uses('1x3'))
+    ok &= run('inside: screenshot 2', rows_of(g), (0, 0, 15, 8), expect=uses('1x3', 'book'))
     # no-room names the design size
     rows, area = scenario_straight(6, 6, gap=10, w=14)
     ents, lents, rocks = parse_world(rows)
-    r = planner.plan(make_world(lua_list(lents), lua_list(rocks), *area, 5))
+    r = planner.plan(make_world(lua_list(lents), lua_list(rocks), *area, 5, None, True))
     reason = list(r[1].values())
     good = reason == ['lbb.no-room', 6, 6, 11, 20]
     print(('PASS' if good else 'FAIL') + f' no-room names the design size: {reason}')
@@ -389,16 +391,18 @@ def check_detect(name, rows, area, want_in, want_out):
 def uses_ports(n, m):
     """the template's ports are the existing belt ends: no port belts built"""
     def f(plan, ents):
-        if plan.template.name != '1x3':
-            return f'expected template 1x3, got {plan.template.name}'
+        if plan.template.name not in ('1x3', 'book'):
+            return f'expected a 1 -> 3 template, got {plan.template.name}'
         routed = [e for e in ents if e.route]
         return f'{len(routed)} route belts, expected none' if routed else None
     return f
 
 
-def uses(name):
+def uses(*names):
     def f(plan, ents):
-        return None if plan.template.name == name else f'expected template {name}, got {plan.template.name}'
+        if plan.template.name in names:
+            return None
+        return f'expected template {" or ".join(names)}, got {plan.template.name}'
     return f
 
 
@@ -473,6 +477,53 @@ def fuzz(seed, count):
     return ok
 
 
+stepwise = lua.eval('''
+function(world, tick)
+  -- like control.lua: the state may only hold what `storage` can save
+  local function check(v, seen, path)
+    local t = type(v)
+    if t == "function" or t == "thread" or t == "userdata" then error("unsaveable " .. t .. " at " .. path) end
+    if t ~= "table" or seen[v] then return end
+    seen[v] = true
+    if getmetatable(v) then error("metatable at " .. path) end
+    for k, x in pairs(v) do check(k, seen, path .. "<key>"); check(x, seen, path .. "." .. tostring(k)) end
+  end
+  local blocked = world.blocked
+  world.blocked = nil
+  local P, reason = planner_mod.start(world)
+  if not P then return nil, reason end
+  local steps = 0
+  while true do
+    check(P, {}, "P")
+    steps = steps + 1
+    local res, why, hint = planner_mod.step(P, tick, blocked)
+    if res then return res, steps end
+    if res == false then return nil, why, hint, steps end
+  end
+end''')
+
+
+def check_stepwise(name, rows, area, tick=300):
+    """planning in small slices gives exactly the one-go result"""
+    trees = []
+    ents, lents, rocks = parse_world(rows, trees)
+    mk = lambda: make_world(lua_list(lents), lua_list(rocks), *area, 5,
+                            lua_list([lua_list(t) for t in trees]))
+    one, reason1 = call_plan(mk())
+    r = stepwise(mk(), tick)
+    many = r[0]
+    def sig(plan):
+        if plan is None:
+            return None
+        pe = plan.entities
+        return [(e.kind, e.x, e.y, e.dir, e.io) for e in (pe[i] for i in range(1, len(pe) + 1))]
+    steps = r[1] if many is not None else r[-1]
+    good = sig(one) == sig(many)
+    print(('PASS' if good else 'FAIL') + f' stepwise {name}: {steps} steps of {tick}, '
+          + (f'{len(sig(one))} entities' if one is not None else 'refused in both'))
+    return good
+
+
 def fuzz_big(seed, count):
     """more belts (up to 8 each way) and belt lines crossing the gap"""
     rnd = random.Random(seed)
@@ -509,8 +560,28 @@ def fuzz_big(seed, count):
     return ok
 
 
+def stepwise_checks():
+    ok = True
+    for n, m, gap in [(2, 2, 10), (4, 4, 14), (3, 3, 14), (6, 6, 24), (1, 1, 10)]:
+        rows, area = scenario_straight(n, m, gap=gap, w=max(n, m) + 10)
+        ok &= check_stepwise(f'{n}->{m}', rows, area)
+    rows, area = scenario_straight(4, 4, gap=14, w=14)
+    g = [r.split() for r in rows]
+    for x in range(len(g[0])):
+        g[3][x] = '<'
+        g[12][x] = '>'
+    ok &= check_stepwise('crossing lines 4->4', rows_of(g), (1, area[1], area[2] - 1, area[3]))
+    g = blank(6, 4)
+    for y in (0, 1, 2):
+        g[y][5] = '>'
+    g[3][0] = '>'
+    ok &= check_stepwise('too small 1->3 (hint)', rows_of(g), (0, 0, 5, 3), tick=50)
+    return ok
+
+
 if __name__ == '__main__':
     good = fixed()
+    good &= stepwise_checks()
     good &= fuzz(1234, 150)
     good &= fuzz_big(99, 60)
     print('ALL PLANNER TESTS OK' if good else 'PLANNER TESTS FAILED')

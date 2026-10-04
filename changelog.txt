@@ -13,6 +13,11 @@ Date: 2026-10-04
     - Designs with unused inputs are avoided when a smaller one fits (2 belts -> 4 now builds 2 -> 4, not 4 -> 4).
     - A balancer output may go straight into an underground when something sits right in front of it (e.g. chests after the splitters).
     - Existing input / output belts are only replaced by undergrounds when nothing else works.
+    - Planning is spread over ticks (map setting "Planning work per tick", default 500) so the game no longer freezes; the state is kept in storage, safe for saving and multiplayer.
+    - Compact 2 -> 3 balancer (7 x 6) from a user's build.
+    - 106 balancers imported from a balancer blueprint book (Yellow/Red/Blue books and Raynquist's), every one proved balanced by the simulator; 1-8 -> 1-8 and several larger counts.
+    - Designs with the fewest inputs are tried first; ones with spare inputs only if those don't fit.
+    - Templates support south-facing undergrounds and splitters facing every direction.
   Changes:
     - 4 -> 3 is now supported.
 ---------------------------------------------------------------------------------------------------

@@ -72,6 +72,22 @@ return {
     },
   },
   {
+    -- From a user's build: A splits the two inputs onto B and C; B's
+    -- spare output loops round to the sideways splitter H, which feeds B
+    -- again and (under the inputs) C. Each output gets exactly a third.
+    name = "2x3",
+    inputs = 2, outputs = 3,
+    note = "2 → 3 balancer (loop-back)",
+    grid = {
+      ". . . ^ ^ ^ .",
+      "v < < ^ ^ ^ .",
+      "v . S s S s .",
+      "> K ^ S s ^ <",
+      ". k e ^ ^ E ^",
+      ". . . ^ ^ . .",
+    },
+  },
+  {
     name = "2x2",
     inputs = 2, outputs = 2,
     note = "2 → 2 balancer",

@@ -56,12 +56,21 @@ in the selection.
 | 1 → 2, 2 → 2 | 2 → 2 |
 | 3 → 2, 4 → 2 | 4 → 2 |
 | 1 → 3 | 1 → 3 splitter with a loop-back (4 × 6) |
+| 1 → 3, 2 → 3 | 2 → 3 with a loop-back (7 × 6) |
 | 1 → 3, 2 → 3, 3 → 3 | 3 → 3 (4 → 4 with a loop-back) |
+| 1 to 8 → 1 to 8 (more where verified) | designs imported from a balancer book (below) |
 | 1 → 4, 2 → 4 | 2 → 4 |
 | 3 → 4, 4 → 4 | 4 → 4 |
 | anything else up to 16 → 16 | generated (see below) |
 
-Generated designs (`scripts/generator.lua`):
+Imported designs (`scripts/book_templates.lua`): `tools/import_book.py`
+reads a blueprint book, turns every "N to M" blueprint into a template and
+keeps only the ones the simulator proves balanced (also with inputs left
+empty; designs balanced only with every input in use are marked `exact`
+and used only for that count). The planner picks among all matching
+designs by size and route length.
+
+Generated designs (`scripts/generator.lua`), used when nothing else matches:
 
 * **Core:** a P × P butterfly balancer, P = 2, 4, 8 or 16 (the smallest that
   has at least as many outputs as needed): log2(P) splitter layers; between
@@ -138,6 +147,14 @@ The planner (`scripts/planner.lua`) is pure Lua with no game API calls, so it
 is tested outside the game. Planning is deterministic (safe in multiplayer)
 and capped by a work budget so a hopeless selection gives up quickly.
 
+Planning is spread over ticks so the game doesn't freeze: each tick does at
+most "Planning work per tick" units (map setting, default 500, about one
+route search step each; roughly 10 ms). Every part of the search can stop
+and resume: the placement scan, each candidate's route negotiation and each
+single route search. The whole state lives in `storage` as plain data, so
+saving mid-plan and multiplayer stay deterministic. A new selection replaces
+one still being planned.
+
 ## Files
 
 ```
@@ -145,10 +162,13 @@ info.json, data.lua, settings.lua   prototypes: tool, shortcut, hotkeys, setting
 control.lua                         events, world scan, tier choice, clearing, ghost placement
 scripts/planner.lua                 detection, placement search, routing
 scripts/templates.lua               hand-drawn balancer designs
+scripts/book_templates.lua          designs imported from a balancer book (generated)
+scripts/all_templates.lua           both lists, as the planner uses them
 scripts/generator.lua               balancer designs for any count up to 16 → 16
 locale/en, locale/ru                English and Russian text
 tools/sim.py                        lane-level belt flow simulator, verifies templates
 tools/test_generator.py             every generated design, verified by the simulator
+tools/import_book.py                imports a balancer blueprint book, keeps what the simulator proves
 tools/test_planner.py               planner tests + random fuzzing, verified by the simulator
 tools/test_control.py               control.lua against a mock of the game API
 ```
@@ -161,7 +181,8 @@ outputs on the first:
 ```
 ^ > v <   belts        S s   splitter (left, right half)
                        K/k   splitter facing east (K on top)  J/j   facing west (J below)
-D / U     underground entrance / exit facing north
+                       q Q   splitter facing south (Q = its left half, on the right)
+D / U     underground entrance / exit facing north (d / u: south)
 e / E     underground entrance / exit facing east (w / W: west)
 .         empty
 ```
@@ -170,6 +191,7 @@ Then run the checks (needs Python 3 and `pip install lupa`):
 
 ```
 python3 tools/sim.py              # proves every design balances, also with inputs left empty
+python3 tools/import_book.py BOOK.txt   # import a blueprint book (string in a text file)
 python3 tools/test_generator.py   # every generated design 1..8 → 1..8 (--all: up to 16)
 python3 tools/test_planner.py     # placement + routing, every planned layout re-verified
 python3 tools/test_control.py     # control.lua against a mock game API

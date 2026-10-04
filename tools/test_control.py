@@ -14,7 +14,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), 
 MOCK = r'''
 defines = {
   direction = {north = 0, northeast = 2, east = 4, southeast = 6, south = 8, southwest = 10, west = 12, northwest = 14},
-  events = {on_player_selected_area = 101, on_player_alt_selected_area = 102},
+  events = {on_player_selected_area = 101, on_player_alt_selected_area = 102, on_tick = 103},
   build_check_type = {script = 0, manual = 1, manual_ghost = 2, script_ghost = 3, blueprint_ghost = 4, ghost_revive = 5},
 }
 local function proto(name, type, speed, extra)
@@ -47,14 +47,26 @@ script = {
 storage = {}
 MESSAGES = {}
 FORCE = {name = "player", recipes = {["cliff-explosives"] = {enabled = false}}}
+settings = {global = {["lbb-work-per-tick"] = {value = WORK_PER_TICK or 500}}}
 PLAYER = {
-  index = 1, force = FORCE,
+  index = 1, force = FORCE, valid = true,
   mod_settings = {["lbb-tier"] = {value = "fastest"}, ["lbb-verbose"] = {value = true}},
   print = function(m) MESSAGES[#MESSAGES + 1] = m end,
   create_local_flying_text = function(t) end,
   play_sound = function(t) end,
 }
-game = {get_player = function(i) return PLAYER end}
+game = {get_player = function(i) return PLAYER end, tick = 0}
+-- run ticks until no planning job is left; returns the number of ticks
+function run_ticks()
+  local n = 0
+  while next(storage.jobs or {}) do
+    n = n + 1
+    game.tick = game.tick + 1
+    HANDLERS[defines.events.on_tick]({tick = game.tick})
+    assert(n < 100000, "planning never finished")
+  end
+  return n
+end
 
 -- world
 ENTITIES = {}
@@ -63,8 +75,17 @@ local function in_box(p, a)
   return p.x >= a[1][1] and p.x <= a[2][1] and p.y >= a[1][2] and p.y <= a[2][2]
 end
 local function tilekey(x, y) return math.floor(x) .. "," .. math.floor(y) end
+-- cached until ENTITIES changes (entities only get added or invalidated)
+local occ_cache, occ_list, occ_n, occ_valid = nil, nil, -1, -1
 function occupied_tiles()
+  local valid = 0
+  for _, e in ipairs(ENTITIES) do if e.valid then valid = valid + 1 end end
+  if occ_cache and occ_list == ENTITIES and occ_n == #ENTITIES and occ_valid == valid then
+    return occ_cache
+  end
+  occ_list, occ_n, occ_valid = ENTITIES, #ENTITIES, valid
   local occ = {}
+  occ_cache = occ
   for _, e in ipairs(ENTITIES) do
     if e.valid then
       local t = e.type == "entity-ghost" and e.ghost_type or e.type
@@ -84,7 +105,7 @@ function occupied_tiles()
   end
   return occ
 end
-SURFACE = {}
+SURFACE = {valid = true}
 function SURFACE.find_entities_filtered(f)
   local types
   if f.type then
@@ -184,6 +205,8 @@ def scenario(rows, area, belt='transport-belt', explosives=False):
         area = {{left_top = {{x = {area[0]}, y = {area[1]}}}, right_bottom = {{x = {area[2] + 1}, y = {area[3] + 1}}}}},
         entities = {{}}}}''')
     lua.eval('HANDLERS[defines.events.on_player_selected_area]')(ev)
+    global LAST_TICKS
+    LAST_TICKS = lua.eval('run_ticks')()
     def ls(m):
         try:
             vals = list(m.values())
