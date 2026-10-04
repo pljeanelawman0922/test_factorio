@@ -440,7 +440,7 @@ local UNUSED_PORT_COST = 10
 -- extra cost of an underground pair over plain belts on the same tiles
 local UG_COST = 1.5
 -- extra cost of replacing an input end / output start belt by an underground
-local REPLACE_COST = 1
+local REPLACE_COST = 3
 -- slightly over 1: breaks ties between equal-cost tiles towards the goal,
 -- which keeps A* from flooding open ground
 local H_WEIGHT = 1.001
@@ -684,8 +684,10 @@ local function try_candidate(world, cand, free, clear_at, use_ug)
   end
   for _, pr in ipairs(cand.out_pairs) do
     local port, o = pr[1], pr[2]
-    -- ug_start: the template's output port may become an entrance
-    jobs[#jobs + 1] = {sx = port.fx, sy = port.fy, sdir = var.flow,
+    -- ug_start: the template's output port may become an entrance (the only
+    -- way out when something sits in front of the port)
+    if port.blocked and not use_ug then return nil end
+    jobs[#jobs + 1] = {sx = port.fx, sy = port.fy, sdir = var.flow, blocked = port.blocked,
                        tx = o.x, ty = o.y, tdir = o.dir, side_ok = o.side_ok,
                        ug_end = o.ent.kind == "belt",
                        ug_start = {port.fx - DX[var.flow], port.fy - DY[var.flow]},
@@ -704,7 +706,7 @@ local function try_candidate(world, cand, free, clear_at, use_ug)
       local kk = key(x, y)
       if tocc[kk] or not free(x, y) then return false end
       local isstart = (x == job.sx and y == job.sy)
-      if isstart then return true end
+      if isstart then return not job.blocked end
       if reserved[kk] then return false end
       if fed[kk] or tfed[kk] then return false end
       return true
@@ -946,6 +948,7 @@ plan_for = function(world, inputs, outputs)
     end
   end
 
+  local route_ug = (world.ug_max or 5) >= 2 and not world.no_route_ug
   local cands = {}
   for ti, tpl in ipairs(tpls) do
     for _, var in ipairs(variants_of(tpl)) do
@@ -1013,10 +1016,13 @@ plan_for = function(world, inputs, outputs)
                   local e = var.ents[idx]
                   local fx, fy = e.x + ox + DX[e.dir], e.y + oy + DY[e.dir]
                   local fk = key(fx, fy)
+                  local blocked_front = false
                   if not (output_tile[fk] or (in_area(a, fx, fy) and free(fx, fy) and not fed[fk])) then
-                    ok = false; break
+                    -- something in front: only an underground from the port gets out
+                    if not route_ug then ok = false; break end
+                    blocked_front = true
                   end
-                  oports[#oports + 1] = {fx = fx, fy = fy, idx = idx}
+                  oports[#oports + 1] = {fx = fx, fy = fy, idx = idx, blocked = blocked_front}
                 end
               end
               if ok then

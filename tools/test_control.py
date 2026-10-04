@@ -378,7 +378,7 @@ check('1->3 tight (screenshot 3)', rows, (0, 0, 6, 5), [(1, 4)], [(6, 2), (6, 3)
 # too small: refused, with the design size and a selection size that works
 rows = ['. . . . . >', '. . . . . >', '. . . . . >', '> . . . . .']
 msgs, created, full = scenario(rows, (0, 0, 5, 3))
-good = not created and 'lbb.try-size(8, 6, 1)' in msgs[-1] and 'lbb.no-room(1, 3, 4, 6)' in msgs[-1]
+good = not created and 'lbb.try-size(8, 6, 1)' in msgs[-1] and 'lbb.no-route(1, 3)' in msgs[-1]
 print(('PASS ' if good else 'FAIL ') + f'size hint: {msgs[-1]}')
 ok_all &= good
 
