@@ -26,6 +26,7 @@ Date: 2026-10-04
     - Players planning at the same time share the work per tick.
   Bugfixes:
     - Fixed planning occasionally stalling for minutes when designs were first loaded (weak-keyed cache in the planner).
+    - Fixed a crash when the progress window opened ("Invalid name "text": LuaGuiElement contains a property or method with the same name").
     - Templates support south-facing undergrounds and splitters facing every direction.
   Changes:
     - 4 -> 3 is now supported.

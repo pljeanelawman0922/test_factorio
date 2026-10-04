@@ -50,12 +50,21 @@ MESSAGES = {}
 FORCE = {name = "player", recipes = {["cliff-explosives"] = {enabled = false}}}
 settings = {global = {["lbb-work-per-tick"] = {value = WORK_PER_TICK or 500},
                      ["lbb-time-limit"] = {value = 20}}}
--- a tiny GUI: named children reachable as fields, style, destroy
+-- a tiny GUI: named children reachable as fields, style, destroy. Like the
+-- game, it refuses child names that clash with LuaGuiElement properties.
+local GUI_RESERVED = {}
+for _, k in ipairs({"name", "type", "caption", "value", "text", "style", "children", "parent",
+                    "valid", "visible", "enabled", "index", "direction", "location", "tags",
+                    "tooltip", "elem_value", "state", "items", "selected_index", "sprite",
+                    "number", "add", "destroy", "clear", "focus"}) do GUI_RESERVED[k] = true end
 local function gui_element(parent, spec)
   local e = {type = spec.type, name = spec.name, caption = spec.caption, value = spec.value,
              valid = true, style = {}, children = {}}
   setmetatable(e, {__index = function(t, k) return rawget(t, "children")[k] end})
   e.add = function(sp)
+    if sp.name and GUI_RESERVED[sp.name] then
+      error('Invalid name "' .. sp.name .. '": LuaGuiElement contains a property or method with the same name.')
+    end
     local c = gui_element(e, sp)
     if sp.name then e.children[sp.name] = c end
     return c
@@ -481,9 +490,9 @@ lua.eval('select_area')(*area)
 for _ in range(15):
     lua.eval('tick_once')()
 win = lua.eval('window()')
-bar1 = win.bar.value if win else None
+bar1 = win.lbb_bar.value if win else None
 report('progress window while planning', bool(win) and 0 <= bar1 <= 1,
-       f'bar {bar1}, "{lua.eval("window() and window().row.text.caption[1]")}"')
+       f'bar {bar1}, "{lua.eval("window() and window().lbb_row.lbb_label.caption[1]")}"')
 # a second selection is refused and keeps the running plan
 lua.execute('JOB_BEFORE = storage.jobs[1]')
 lua.eval('select_area')(*area)
@@ -491,10 +500,10 @@ report('busy: second selection refused', 'lbb.busy' in lua.eval('last_message()'
        and lua.eval('storage.jobs[1] == JOB_BEFORE'), lua.eval('last_message()'))
 for _ in range(60):
     lua.eval('tick_once')()
-bar2 = lua.eval('window() and window().bar.value')
+bar2 = lua.eval('window() and window().lbb_bar.value')
 report('progress grows', bar2 is not None and bar2 >= bar1, f'{bar1} -> {bar2}')
 # Cancel
-lua.eval('HANDLERS[defines.events.on_gui_click]')(lua.eval('{player_index = 1, element = window().row.lbb_cancel}'))
+lua.eval('HANDLERS[defines.events.on_gui_click]')(lua.eval('{player_index = 1, element = window().lbb_row.lbb_cancel}'))
 report('cancel stops the plan and closes the window',
        lua.eval('storage.jobs[1] == nil and window() == nil') and 'lbb.cancelled' in lua.eval('last_message()'))
 

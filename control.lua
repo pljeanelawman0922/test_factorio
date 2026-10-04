@@ -353,8 +353,6 @@ place_plan = function(player, job, plan)
   end
 end
 
--- Advances player `idx`'s planning by one slice of work. Small plans
--- finish in the tick they were started.
 ------------------------------------------------------------- progress
 
 local GUI = "lbb_progress"
@@ -367,22 +365,25 @@ end
 local function show_progress(player, job, limit)
   local frame = player.gui.screen[GUI]
   if not frame then
+    -- child names must not clash with LuaGuiElement properties ("text",
+    -- "value", ...), so they all carry the lbb_ prefix
     frame = player.gui.screen.add{type = "frame", name = GUI, direction = "vertical",
                                   caption = {"lbb.progress-title", job.n_in, job.n_out}}
-    frame.add{type = "progressbar", name = "bar", value = 0}
-    frame.bar.style.horizontally_stretchable = true
-    local row = frame.add{type = "flow", name = "row", direction = "horizontal"}
-    row.add{type = "label", name = "text"}
-    row.add{type = "empty-widget", name = "gap"}.style.horizontally_stretchable = true
+    local bar = frame.add{type = "progressbar", name = "lbb_bar", value = 0}
+    bar.style.horizontally_stretchable = true
+    local row = frame.add{type = "flow", name = "lbb_row", direction = "horizontal"}
+    row.add{type = "label", name = "lbb_label"}
+    local gap = row.add{type = "empty-widget", name = "lbb_gap"}
+    gap.style.horizontally_stretchable = true
     row.add{type = "button", name = "lbb_cancel", caption = {"lbb.cancel"}}
     frame.style.minimal_width = 320
     frame.force_auto_center()
   end
   local value, stage = planner.progress(job.P)
-  frame.bar.value = value
+  frame.lbb_bar.value = value
   local secs = math.floor((game.tick - job.started) / 60)
-  frame.row.text.caption = {stage == "hint" and "lbb.progress-hint" or "lbb.progress-text",
-                            math.floor(value * 100), secs, limit}
+  frame.lbb_row.lbb_label.caption = {stage == "hint" and "lbb.progress-hint" or "lbb.progress-text",
+                                     math.floor(value * 100), secs, limit}
 end
 
 -- Advances player `idx`'s planning by one slice of work. Small plans
