@@ -915,18 +915,32 @@ local function lookups(S, blocked)
 end
 
 -- A search for the given belt ends; nil, reason if no design exists.
-local function search_new(world, inputs, outputs)
-  local n, m = #inputs, #outputs
-  -- candidate templates: hand-drawn ones, else a generated design
-  local tpls = {}
+-- tier 1: only the designs with the fewest inputs that still take all the
+-- belts (no spare splitters); tier 2: the other matching designs; nil: all.
+local function matching(world, n, m)
+  local list, fewest = {}, nil
   local want_lane = (n == 1 and m == 1)
   for _, t in ipairs(world.templates) do
     -- exact: only balanced with every input in use
     if t.outputs == m and t.inputs >= n and (t.lane or false) == want_lane
        and not (t.exact and t.inputs ~= n) then
-      tpls[#tpls + 1] = t
+      list[#list + 1] = t
+      if not fewest or t.inputs < fewest then fewest = t.inputs end
     end
   end
+  return list, fewest
+end
+
+local function search_new(world, inputs, outputs, tier)
+  local n, m = #inputs, #outputs
+  -- candidate templates: hand-drawn / imported ones, else a generated design
+  local all, fewest = matching(world, n, m)
+  local tpls = {}
+  for _, t in ipairs(all) do
+    if not tier or (tier == 1) == (t.inputs == fewest) then tpls[#tpls + 1] = t end
+  end
+  if tier == 2 and #tpls == 0 then return nil end
+  local want_lane = (n == 1 and m == 1)
   if #tpls == 0 and not want_lane then
     tpls[1] = generator.template(n, m, world.ug_max or 5)
   end
@@ -1206,9 +1220,9 @@ function planner.start(world)
   for _, inp in ipairs(inputs) do
     if not in_area(a, inp.sx, inp.sy) then return nil, {"lbb.input-leaves", inp.x, inp.y} end
   end
-  local S, reason = search_new(world, inputs, outputs)
+  local S, reason = search_new(world, inputs, outputs, 1)
   if not S then return nil, reason end
-  return {world = world, inputs = inputs, outputs = outputs, main = S, grow = 0}
+  return {world = world, inputs = inputs, outputs = outputs, main = S, tier = 1, grow = 0}
 end
 
 local HINT_REASONS = {["lbb.no-room"] = true, ["lbb.no-route"] = true, ["lbb.gave-up"] = true}
@@ -1219,14 +1233,21 @@ local HINT_REASONS = {["lbb.no-room"] = true, ["lbb.no-route"] = true, ["lbb.gav
 -- hint = {w, h, grow}: the same belt ends could be connected in a
 -- selection grown by `grow` tiles on each side (w x h tiles).
 function planner.step(P, tick, blocked)
-  if P.main then
+  while P.main do
     if not search_step(P.main, tick, blocked) then return nil end
     local S = P.main
     P.main = nil
     if S.plan then return S.plan end
-    P.reason = S.reason
-    if P.world.no_hint or not HINT_REASONS[S.reason[1]] then return false, S.reason end
+    P.reason = P.reason or S.reason   -- the first tier's reason: its designs are the smallest
+    if not HINT_REASONS[S.reason[1]] then return false, S.reason end
+    if P.tier == 1 then
+      -- the designs with spare inputs might still fit
+      P.tier = 2
+      P.main = search_new(P.world, P.inputs, P.outputs, 2)
+      if P.main then return nil end
+    end
   end
+  if P.world.no_hint then return false, P.reason end
   -- would a bigger selection do? same belt ends, more ground around them
   local a = P.world.area
   local w, h = a.x2 - a.x1 + 1, a.y2 - a.y1 + 1

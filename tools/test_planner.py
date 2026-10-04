@@ -30,7 +30,7 @@ lua.execute('planner_mod = require("scripts.planner")')
 templates = lua.eval('require("scripts.templates")')
 
 make_world = lua.eval('''
-function(ents, rocks, x1, y1, x2, y2, ug_max, trees)
+function(ents, rocks, x1, y1, x2, y2, ug_max, trees, hand_only)
   local blocked = {}
   for _, r in ipairs(rocks) do blocked[r[1] .. "," .. r[2]] = true end
   for _, r in ipairs(trees or {}) do blocked[r[1] .. "," .. r[2]] = 1 end
@@ -39,7 +39,7 @@ function(ents, rocks, x1, y1, x2, y2, ug_max, trees)
     entities = ents,
     ug_spans = {},
     blocked = function(x, y) return blocked[x .. "," .. y] or false end,
-    templates = require("scripts.all_templates"),
+    templates = hand_only and require("scripts.templates") or require("scripts.all_templates"),
     ug_max = ug_max or 5,
   }
 end''')
@@ -80,12 +80,13 @@ def parse_world(rows, trees=None):
     return ents, lents, rocks
 
 
-def run(name, rows, area, expect_ok=True, lane=None, ug_max=5, expect=None):
-    """expect: optional function(plan, entity list) -> error string or None"""
+def run(name, rows, area, expect_ok=True, lane=None, ug_max=5, expect=None, hand_only=False):
+    """expect: optional function(plan, entity list) -> error string or None
+    hand_only: plan with the hand-drawn templates only (no imported book)"""
     trees = []
     ents, lents, rocks = parse_world(rows, trees)
     world = make_world(lua_list(lents), lua_list(rocks), *area, ug_max,
-                       lua_list([lua_list(t) for t in trees]))
+                       lua_list([lua_list(t) for t in trees]), hand_only)
     plan, reason = call_plan(world)
     if plan is None:
         r = [reason[i] for i in range(1, len(reason) + 1)]
@@ -233,7 +234,7 @@ def fixed():
     for n, m, gap, w in [(4, 3, 16, 14), (6, 6, 24, 18), (8, 8, 24, 18), (6, 2, 18, 14),
                          (3, 7, 26, 20), (8, 1, 14, 14), (5, 5, 28, 20)]:
         rows, area = scenario_straight(n, m, gap=gap, w=w)
-        ok &= run(f'generated {n}->{m}', rows, area, expect=uses('generated'))
+        ok &= run(f'generated {n}->{m}', rows, area, expect=uses('generated'), hand_only=True)
     # unsupported count
     rows, area = scenario_straight(17, 2, gap=10, w=20)
     ok &= run('unsupported 17->2', rows, area, expect_ok=False)
@@ -325,11 +326,11 @@ def fixed():
         g[y][15] = '>'
     g[5][0] = '>'
     ok &= check_detect('inside: screenshot 2', rows_of(g), (0, 0, 15, 8), [(0, 5)], [(15, 0), (15, 4), (15, 8)])
-    ok &= run('inside: screenshot 2', rows_of(g), (0, 0, 15, 8), expect=uses('1x3'))
+    ok &= run('inside: screenshot 2', rows_of(g), (0, 0, 15, 8), expect=uses('1x3', 'book'))
     # no-room names the design size
     rows, area = scenario_straight(6, 6, gap=10, w=14)
     ents, lents, rocks = parse_world(rows)
-    r = planner.plan(make_world(lua_list(lents), lua_list(rocks), *area, 5))
+    r = planner.plan(make_world(lua_list(lents), lua_list(rocks), *area, 5, None, True))
     reason = list(r[1].values())
     good = reason == ['lbb.no-room', 6, 6, 11, 20]
     print(('PASS' if good else 'FAIL') + f' no-room names the design size: {reason}')
@@ -390,16 +391,18 @@ def check_detect(name, rows, area, want_in, want_out):
 def uses_ports(n, m):
     """the template's ports are the existing belt ends: no port belts built"""
     def f(plan, ents):
-        if plan.template.name != '1x3':
-            return f'expected template 1x3, got {plan.template.name}'
+        if plan.template.name not in ('1x3', 'book'):
+            return f'expected a 1 -> 3 template, got {plan.template.name}'
         routed = [e for e in ents if e.route]
         return f'{len(routed)} route belts, expected none' if routed else None
     return f
 
 
-def uses(name):
+def uses(*names):
     def f(plan, ents):
-        return None if plan.template.name == name else f'expected template {name}, got {plan.template.name}'
+        if plan.template.name in names:
+            return None
+        return f'expected template {" or ".join(names)}, got {plan.template.name}'
     return f
 
 

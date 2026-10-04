@@ -75,8 +75,17 @@ local function in_box(p, a)
   return p.x >= a[1][1] and p.x <= a[2][1] and p.y >= a[1][2] and p.y <= a[2][2]
 end
 local function tilekey(x, y) return math.floor(x) .. "," .. math.floor(y) end
+-- cached until ENTITIES changes (entities only get added or invalidated)
+local occ_cache, occ_list, occ_n, occ_valid = nil, nil, -1, -1
 function occupied_tiles()
+  local valid = 0
+  for _, e in ipairs(ENTITIES) do if e.valid then valid = valid + 1 end end
+  if occ_cache and occ_list == ENTITIES and occ_n == #ENTITIES and occ_valid == valid then
+    return occ_cache
+  end
+  occ_list, occ_n, occ_valid = ENTITIES, #ENTITIES, valid
   local occ = {}
+  occ_cache = occ
   for _, e in ipairs(ENTITIES) do
     if e.valid then
       local t = e.type == "entity-ghost" and e.ghost_type or e.type
