@@ -268,6 +268,33 @@ def fixed():
         g[2][x] = '#'
     ok &= run('rock wall at inputs 2->2', rows_of(g), area, expect=replaces('in'))
 
+    # belts lying completely inside the selection (the screenshot from the
+    # bug report: 1 belt left, 3 stacked right, all facing east)
+    shot = ['. . . . . . . . . .',
+            '. . . . . . . > . .',
+            '. . . . . . . > . .',
+            '. . > . . . . > . .',
+            '. . . . . . . . . .']
+    ok &= check_detect('inside: screenshot', shot, (0, 0, 9, 4), [(2, 3)], [(7, 1), (7, 2), (7, 3)])
+    ok &= run('inside: screenshot + 1 row', ['. ' * 9 + '.'] + shot + ['. ' * 9 + '.'], (0, 0, 9, 5))
+    # longer pieces, inputs and outputs both inside, turning flow
+    g = blank(14, 16)
+    for x in (3, 4, 5):
+        g[1][x] = g[2][x] = 'v'
+    for y in (11, 12):
+        g[y][9] = g[y][10] = '>'
+    ok &= check_detect('inside: pieces', rows_of(g), (0, 0, 13, 15),
+                       [(3, 2), (4, 2), (5, 2)], [(9, 11), (9, 12)])
+    ok &= run('inside: pieces 3->2', rows_of(g), (0, 0, 13, 15))
+    # inputs from outside, output stubs inside
+    rows, area = scenario_straight(2, 3, gap=10)
+    g = [r.split() for r in rows]
+    for x in range(len(g[0])):
+        g[h_last(g)][x] = '.'
+    ok &= check_detect('inside: output stubs', rows_of(g), area,
+                       [(2, 1), (3, 1)], [(4, 12), (5, 12), (6, 12)])
+    ok &= run('inside: output stubs 2->3', rows_of(g), area)
+
     # trees: built over (and marked for clearing) only where needed
     rows, area = scenario_straight(3, 3, gap=14)
     g = [r.split() for r in rows]
@@ -286,6 +313,21 @@ def fixed():
     rows, area = scenario_straight(4, 4)
     ok &= run('ug range 1', rows, area, expect_ok=False, ug_max=1)
     return ok
+
+
+def h_last(g):
+    return len(g) - 1
+
+
+def check_detect(name, rows, area, want_in, want_out):
+    ents, lents, rocks = parse_world(rows)
+    world = make_world(lua_list(lents), lua_list(rocks), *area, 5)
+    ins, outs, _ = planner.detect(world)
+    got_in = sorted((ins[i].x, ins[i].y) for i in range(1, len(ins) + 1))
+    got_out = sorted((outs[i].x, outs[i].y) for i in range(1, len(outs) + 1))
+    good = got_in == sorted(want_in) and got_out == sorted(want_out)
+    print(('PASS' if good else 'FAIL') + f' {name}: inputs {got_in} outputs {got_out}')
+    return good
 
 
 def uses(name):

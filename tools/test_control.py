@@ -359,6 +359,15 @@ check('2->2 rock wall at inputs', rows, area, ins, outs, post=marks_match({'tran
 rows, area, ins, outs = south_rows(6, 6, 24, 18)
 check('6->6 generated', rows, area, ins, outs)
 
+# bug report screenshot (+1 row): single belts lying inside the selection
+rows = ['. . . . . . . . . .',
+        '. . . . . . . . . .',
+        '. . . . . . . > . .',
+        '. . . . . . . > . .',
+        '. . > . . . . > . .',
+        '. . . . . . . . . .']
+check('1->3 belts inside the selection', rows, (0, 0, 9, 5), [(2, 4)], [(7, 2), (7, 3), (7, 4)])
+
 # remove-last also takes back the deconstruction marks
 rows, area, ins, outs = south_rows(2, 2, 12, 10, band=[6, 7, 8])
 msgs, created, full = scenario(rows, area)

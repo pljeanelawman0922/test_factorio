@@ -261,13 +261,35 @@ local function chain_leaves(world, e, way)
   return false
 end
 
+local function centroid(list, fx, fy)
+  local sx, sy = 0, 0
+  for _, p in ipairs(list) do sx, sy = sx + p[fx], sy + p[fy] end
+  return sx / #list, sy / #list
+end
+
 -- Find dangling belt ends (inputs) and starts (outputs) inside the area.
--- Inputs must come from outside the area, outputs must leave it; belt
--- fragments lying fully inside are ignored (counted in `ignored`).
+--
+-- A belt that comes in from outside and ends inside is an input; one that
+-- starts inside and leaves is an output. Belt pieces lying completely
+-- inside (a single belt or a short chain, start and end both inside) are
+-- used too: a piece with more of the other belts ahead of it than behind it
+-- is an input, otherwise an output. Pieces that can't be paired up into one
+-- start and one end are ignored (counted in `ignored`).
 function planner.detect(world)
   if not world._occ then index_world(world) end
   local occ, fed, a = world._occ, world._fed, world.area
   local inputs, outputs, ignored = {}, {}, 0
+  local loose_ends, loose_starts = {}, {}
+  local function as_input(e)
+    local t = e.tiles[1]
+    inputs[#inputs + 1] = {ent = e, x = t[1], y = t[2], dir = e.dir,
+                           sx = t[1] + DX[e.dir], sy = t[2] + DY[e.dir], speed = e.speed}
+  end
+  local function as_output(e)
+    local t = e.tiles[1]
+    outputs[#outputs + 1] = {ent = e, x = t[1], y = t[2], dir = e.dir,
+                             side_ok = e.kind == "belt", speed = e.speed}
+  end
   for _, e in ipairs(world.entities) do
     if (e.kind == "belt" or e.kind == "ug") then
       local t = e.tiles[1]
@@ -279,21 +301,91 @@ function planner.detect(world)
         local can_in = (e.kind == "belt" or e.io == "out") and not has_consumer and front == nil
         local can_out = (e.kind == "belt" or e.io == "in") and not has_feeder
         if can_in then
-          if chain_leaves(world, e, -1) then
-            inputs[#inputs + 1] = {ent = e, x = t[1], y = t[2], dir = e.dir, sx = fx, sy = fy,
-                                   speed = e.speed}
-          else
-            ignored = ignored + 1
-          end
+          if chain_leaves(world, e, -1) then as_input(e)
+          else loose_ends[#loose_ends + 1] = e end
         end
         if can_out then
-          if chain_leaves(world, e, 1) then
-            outputs[#outputs + 1] = {ent = e, x = t[1], y = t[2], dir = e.dir,
-                                     side_ok = e.kind == "belt", speed = e.speed}
-          else
-            ignored = ignored + 1
-          end
+          if chain_leaves(world, e, 1) then as_output(e)
+          else loose_starts[#loose_starts + 1] = e end
         end
+      end
+    end
+  end
+
+  -- pair every loose start with the loose end its belt leads to
+  local is_end = {}
+  for _, e in ipairs(loose_ends) do is_end[e] = true end
+  local pieces, starts_of = {}, {}
+  for _, s in ipairs(loose_starts) do
+    local cur, steps = s, 0
+    while cur and not is_end[cur] and steps < 4096 do
+      steps = steps + 1
+      local nxt
+      if cur.kind == "ug" and cur.io == "in" then
+        nxt = cur.partner and occ[key(cur.partner[1], cur.partner[2])]
+      else
+        local p = push_tiles(cur)[1]
+        nxt = occ[key(p[1], p[2])]
+      end
+      if nxt and nxt.kind ~= "belt" and nxt.kind ~= "ug" then nxt = nil end
+      cur = nxt
+    end
+    if cur and is_end[cur] then
+      if not starts_of[cur] then
+        starts_of[cur] = {}
+        pieces[#pieces + 1] = cur
+      end
+      table.insert(starts_of[cur], s)
+    else
+      ignored = ignored + 1
+    end
+  end
+  local paired = {}
+  for _, e in ipairs(pieces) do paired[e] = true end
+  for _, e in ipairs(loose_ends) do if not paired[e] then ignored = ignored + 1 end end
+
+  -- classify pieces: count belts ahead of / behind each piece's end
+  local loose = {}
+  for _, e in ipairs(pieces) do
+    if #starts_of[e] == 1 then
+      local s = starts_of[e][1]
+      local te, ts = e.tiles[1], s.tiles[1]
+      loose[#loose + 1] = {e = e, s = s, x = te[1], y = te[2], dir = e.dir,
+                           mx = (te[1] + ts[1]) / 2, my = (te[2] + ts[2]) / 2}
+    else
+      ignored = ignored + #starts_of[e]   -- several belts merging: unclear
+    end
+  end
+  if #loose == 0 then return inputs, outputs, ignored end
+  local points = {}
+  for _, i in ipairs(inputs) do points[#points + 1] = {x = i.x, y = i.y} end
+  for _, o in ipairs(outputs) do points[#points + 1] = {x = o.x, y = o.y} end
+  for _, p in ipairs(loose) do points[#points + 1] = {x = p.mx, y = p.my, piece = p} end
+  local undecided = {}
+  for _, p in ipairs(loose) do
+    local score = 0
+    for _, q in ipairs(points) do
+      if q.piece ~= p then
+        local ahead = (q.x - p.x) * DX[p.dir] + (q.y - p.y) * DY[p.dir]
+        if ahead >= 0.5 then score = score + 1 elseif ahead <= -0.5 then score = score - 1 end
+      end
+    end
+    if score > 0 then as_input(p.e)
+    elseif score < 0 then as_output(p.s)
+    else undecided[#undecided + 1] = p end
+  end
+  -- nothing ahead or behind (e.g. side by side): fill the missing side,
+  -- else join the nearer group
+  for _, p in ipairs(undecided) do
+    if #inputs == 0 then as_input(p.e)
+    elseif #outputs == 0 then as_output(p.s)
+    else
+      local icx, icy = centroid(inputs, "x", "y")
+      local ocx, ocy = centroid(outputs, "x", "y")
+      if math.abs(p.mx - icx) + math.abs(p.my - icy) <= math.abs(p.mx - ocx) + math.abs(p.my - ocy) then
+        as_input(p.e)
+      else
+        as_output(p.s)
       end
     end
   end
@@ -484,11 +576,6 @@ local function sweep(ahead, cx, cy, x, y)
   return atan2(side, fwd + 0.5)
 end
 
-local function centroid(list, fx, fy)
-  local sx, sy = 0, 0
-  for _, p in ipairs(list) do sx, sy = sx + p[fx], sy + p[fy] end
-  return sx / #list, sy / #list
-end
 
 -- Choose which template input ports the n inputs use (contiguous window,
 -- in projection order) and pair them; returns pairs, cost.

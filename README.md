@@ -1,6 +1,6 @@
 # Belt Balancer Planner (Factorio 2.1)
 
-Drag over the gap between where your input belts end and your output belts
+Drag a rectangle over where your input belts end and your output belts
 begin. The mod finds a balancer that fits in the selection, routes the belts
 to it (going underground where it has to), marks trees, rocks and cliffs in
 the way for removal, and places ghosts for your robots (or you) to build.
@@ -10,7 +10,7 @@ the way for removal, and places ghosts for your robots (or you) to build.
 | Action | How |
 |---|---|
 | Get the tool | Shortcut bar button, or **Alt + B** |
-| Plan a balancer | Drag over the gap |
+| Plan a balancer | Drag over the belt ends (or the gap between them) |
 | Remove planned ghosts in an area | **Shift + drag** with the tool |
 | Remove the last planned balancer | **Shift + Alt + B** |
 
@@ -18,9 +18,18 @@ Set up the belts first:
 
 1. Lay the **input belts** so they end (point into empty ground) inside the
    area you will select.
-2. Lay the **output belts** so they start inside the area and leave it.
-3. Drag over the gap so the selection border crosses every input and output
-   belt.
+2. Lay the **output belts** so they start inside the area (nothing feeding
+   them).
+3. Drag a rectangle over the belt ends with free ground for the balancer in
+   between.
+
+Belts may cross the selection border or lie completely inside it; even a
+single belt piece counts. A belt coming in from outside is an input, one
+leaving the selection is an output. For a piece lying completely inside, the
+mod looks at the other selected belts: if more of them are ahead of the
+piece (in its direction) than behind it, it is an input, otherwise an
+output. Example: one belt on the left and three on the right, all facing
+east, is 1 input → 3 outputs.
 
 Belt tier: the new belts, splitters and undergrounds match the fastest (or,
 per player setting, the slowest) of the selected belts. Modded tiers are found
@@ -37,6 +46,7 @@ in the selection.
 | 2 → 1, 3 → 1, 4 → 1 | merger |
 | 1 → 2, 2 → 2 | 2 → 2 |
 | 3 → 2, 4 → 2 | 4 → 2 |
+| 1 → 3 | 1 → 3 splitter with a loop-back (5 × 7) |
 | 1 → 3, 2 → 3, 3 → 3 | 3 → 3 (4 → 4 with a loop-back) |
 | 1 → 4, 2 → 4 | 2 → 4 |
 | 3 → 4, 4 → 4 | 4 → 4 |
@@ -72,9 +82,10 @@ selection ─▶ detect ends ─▶ pick / generate design ─▶ try placements
 
 1. **Detect.** Every belt or underground exit in the selection that points
    into empty ground is an input end; every belt or underground entrance with
-   nothing feeding it is an output start. The belt chain is traced to check
-   that inputs come from outside the selection and outputs leave it, so stray
-   belt pieces inside the gap are ignored.
+   nothing feeding it is an output start. The belt chain is traced: an end
+   fed from outside the selection is an input, a start leading out of it is
+   an output. Pieces lying completely inside are paired up (start → end) and
+   classified by how many of the other belts lie ahead of / behind them.
 2. **Pick designs.** Designs are ASCII templates (`scripts/templates.lua`)
    with an exact output count and a maximum input count. A true balancer
    stays balanced when some inputs are empty, so a 4 → 4 also serves 3 → 4.

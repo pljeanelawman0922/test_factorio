@@ -6,6 +6,8 @@ Date: 2026-10-04
     - Routes use underground belts when plain belts can't get through (under other belts, rocks, water, cliffs).
     - Routes may turn an input end, an output start or a balancer port into an underground belt of the same direction.
     - Trees, rocks and cliffs (with cliff explosives) under the planned layout are marked for deconstruction; removing the planned balancer cancels the marks.
+    - Belts lying completely inside the selection count as inputs / outputs too (even single belt pieces): a piece with more of the selected belts ahead of it than behind it is an input.
+    - Compact 1 -> 3 splitter (5 x 7).
   Changes:
     - 4 -> 3 is now supported.
 ---------------------------------------------------------------------------------------------------

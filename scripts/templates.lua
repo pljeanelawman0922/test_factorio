@@ -53,6 +53,22 @@ return {
     },
   },
   {
+    -- A splits the input; B and C split again; C's second output loops
+    -- back into A, so each output gets exactly a third.
+    name = "1x3",
+    inputs = 1, outputs = 3,
+    note = "1 → 3 splitter (loop-back)",
+    grid = {
+      "^ ^ ^ . .",
+      "^ ^ ^ > v",
+      "S s S s v",
+      ". ^ ^ . v",
+      ". S s . v",
+      ". ^ ^ < <",
+      ". ^ . . .",
+    },
+  },
+  {
     name = "2x2",
     inputs = 2, outputs = 2,
     note = "2 → 2 balancer",
