@@ -46,8 +46,9 @@ script = {
 }
 storage = {}
 MESSAGES = {}
+FORCE = {name = "player", recipes = {["cliff-explosives"] = {enabled = false}}}
 PLAYER = {
-  index = 1, force = "player",
+  index = 1, force = FORCE,
   mod_settings = {["lbb-tier"] = {value = "fastest"}, ["lbb-verbose"] = {value = true}},
   print = function(m) MESSAGES[#MESSAGES + 1] = m end,
   create_local_flying_text = function(t) end,
@@ -85,18 +86,46 @@ function occupied_tiles()
 end
 SURFACE = {}
 function SURFACE.find_entities_filtered(f)
+  local types
+  if f.type then
+    types = {}
+    for _, t in ipairs(type(f.type) == "table" and f.type or {f.type}) do types[t] = true end
+  end
   local out = {}
   for _, e in ipairs(ENTITIES) do
-    if e.valid and in_box(e.position, f.area) then out[#out + 1] = e end
+    if e.valid and in_box(e.position, f.area) and (not types or types[e.type]) then out[#out + 1] = e end
   end
   return out
 end
+local DECON = {tree = true, cliff = true}
 function SURFACE.can_place_entity(p)
   local k = tilekey(p.position[1], p.position[2])
   if ROCKS[k] then return false end
   local occ = occupied_tiles()
-  if occ[k] and occ[k].type ~= "entity-ghost" then return false end
+  local o = occ[k]
+  if o and o.type ~= "entity-ghost" and not (p.forced and DECON[o.type]) then return false end
   return true
+end
+-- deconstruction orders on any mock entity
+local function decon(e, ok)
+  e.marked = false
+  e.order_deconstruction = function(force, player)
+    if not ok() then return false end
+    e.marked = true
+    return true
+  end
+  e.cancel_deconstruction = function(force) e.marked = false end
+  e.to_be_deconstructed = function() return e.marked end
+  return e
+end
+function add_tree(x, y)
+  ENTITIES[#ENTITIES + 1] = decon({valid = true, type = "tree", name = "tree-01", force = "neutral",
+    position = {x = x + 0.5, y = y + 0.5}, prototype = {}}, function() return true end)
+end
+function add_cliff(x, y)
+  ENTITIES[#ENTITIES + 1] = decon({valid = true, type = "cliff", name = "cliff", force = "neutral",
+    position = {x = x + 0.5, y = y + 0.5}, prototype = {cliff_explosive_prototype = "cliff-explosives"}},
+    function() return FORCE.recipes["cliff-explosives"].enabled end)
 end
 function SURFACE.create_entity(p)
   assert(p.name == "entity-ghost", "only ghosts expected")
@@ -112,8 +141,8 @@ function SURFACE.create_entity(p)
 end
 function add_belt(name, x, y, dir)
   local e = {valid = true, type = prototypes.entity[name].type, name = name, prototype = prototypes.entity[name],
-             position = {x = x + 0.5, y = y + 0.5}, direction = dir}
-  ENTITIES[#ENTITIES + 1] = e
+             position = {x = x + 0.5, y = y + 0.5}, direction = dir, force = FORCE}
+  ENTITIES[#ENTITIES + 1] = decon(e, function() return true end)
 end
 '''
 
@@ -136,8 +165,9 @@ DEF = {0: 0, 1: 4, 2: 8, 3: 12}
 UNDEF = {v: k for k, v in DEF.items()}
 
 
-def scenario(rows, area, belt='transport-belt'):
+def scenario(rows, area, belt='transport-belt', explosives=False):
     lua.execute('ENTITIES = {}; ROCKS = {}; MESSAGES = {}')
+    lua.execute(f'FORCE.recipes["cliff-explosives"].enabled = {"true" if explosives else "false"}')
     ents = {}
     for y, row in enumerate(rows):
         for x, c in enumerate(row.split()):
@@ -146,6 +176,10 @@ def scenario(rows, area, belt='transport-belt'):
                 ents[(x, y)] = {'kind': 'belt', 'dir': SYM[c]}
             elif c == '#':
                 lua.execute(f'ROCKS["{x},{y}"] = true')
+            elif c == 'T':
+                lua.eval('add_tree')(x, y)
+            elif c == 'C':
+                lua.eval('add_cliff')(x, y)
     ev = lua.eval(f'''{{player_index = 1, item = "lbb-balancer-tool", surface = SURFACE,
         area = {{left_top = {{x = {area[0]}, y = {area[1]}}}, right_bottom = {{x = {area[2] + 1}, y = {area[3] + 1}}}}},
         entities = {{}}}}''')
@@ -159,6 +193,10 @@ def scenario(rows, area, belt='transport-belt'):
     msgs = [ls(m) for m in lua.eval('MESSAGES').values()]
     created = [e for e in lua.eval('ENTITIES').values() if e.created and e.valid]
     full = dict(ents)
+    # belts marked for deconstruction are being replaced
+    for e in lua.eval('ENTITIES').values():
+        if e.marked and e.type == 'transport-belt':
+            full.pop((int(e.position.x), int(e.position.y)), None)
     sid = 0
     for e in created:
         d = UNDEF[e.direction]
@@ -188,9 +226,11 @@ def scenario(rows, area, belt='transport-belt'):
 ok_all = True
 
 
-def check(name, rows, area, ins, outs, lane=False, belt='transport-belt', expect=None):
+def check(name, rows, area, ins, outs, lane=False, belt='transport-belt', expect=None,
+          explosives=False, post=None):
+    """post: optional function(created ghosts) -> error string or None"""
     global ok_all
-    msgs, created, full = scenario(rows, area, belt)
+    msgs, created, full = scenario(rows, area, belt, explosives)
     names = sorted({e.ghost_name for e in created})
     if expect == 'fail':
         good = not created
@@ -201,6 +241,11 @@ def check(name, rows, area, ins, outs, lane=False, belt='transport-belt', expect
     good = good and bool(created)
     if expect:
         good = good and names == sorted(expect)
+    if post and good:
+        err = post(created)
+        if err:
+            problems = [err] + list(problems)
+            good = False
     print(('PASS ' if good else 'FAIL ') + f'{name}: {len(created)} ghosts {names} | {msgs[-1] if msgs else ""}')
     for p in problems[:4]:
         print('    ', p)
@@ -255,6 +300,73 @@ check('3->2 west + rocks', rows, (1, 0, 14, 9), [(14, 1), (14, 2), (14, 3)], [(1
 g = grid(6, 6)
 rows = [' '.join(r) for r in g]
 check('empty selection', rows, (0, 0, 5, 5), [], [], expect='fail')
+
+def marks_match(kinds):
+    """every entity of these types under a ghost is marked, no other is"""
+    def f(created):
+        under = set()
+        for e in created:
+            under.add((int(e.position.x), int(e.position.y)))
+            if e.ghost_type == 'splitter':  # mock splitters in these tests face north/south
+                under.add((int(e.position.x - 1), int(e.position.y)))
+        n = 0
+        for e in lua.eval('ENTITIES').values():
+            if e.type in kinds:
+                t = (int(e.position.x), int(e.position.y))
+                if bool(e.marked) != (t in under):
+                    return f'{e.type} at {t}: marked={bool(e.marked)} under ghost={t in under}'
+                n += bool(e.marked)
+        return None if n else f'nothing of {kinds} was marked'
+    return f
+
+
+def south_rows(n, m, gap, w, band=None, sym='T'):
+    g = grid(w, gap + 4)
+    for x in range(2, 2 + n):
+        g[0][x] = g[1][x] = 'v'
+    for x in range(3, 3 + m):
+        g[gap + 2][x] = g[gap + 3][x] = 'v'
+    for y in band or []:
+        for x in range(w):
+            g[y][x] = sym
+    return [' '.join(r) for r in g], (0, 1, w - 1, gap + 2), \
+        [(x, 1) for x in range(2, 2 + n)], [(x, gap + 2) for x in range(3, 3 + m)]
+
+
+# a band of trees across the whole gap: built through, trees marked
+rows, area, ins, outs = south_rows(2, 2, 12, 10, band=[6, 7, 8])
+check('2->2 through trees', rows, area, ins, outs, post=marks_match({'tree'}))
+
+# cliffs: without cliff explosives the belts go under them, with them the
+# cliffs are marked
+def tunnels_no_marks(created):
+    if any(e.marked for e in lua.eval('ENTITIES').values()):
+        return 'something was marked'
+    if not any(e.ghost_type == 'underground-belt' and int(e.position.y) in (5, 8) for e in created):
+        return 'no underground under the cliffs'
+    return None
+
+
+rows, area, ins, outs = south_rows(2, 2, 12, 10, band=[6, 7], sym='C')
+check('2->2 cliffs, no explosives', rows, area, ins, outs, post=tunnels_no_marks)
+check('2->2 cliffs + explosives', rows, area, ins, outs, explosives=True, post=marks_match({'cliff'}))
+
+# rock wall right after the input ends: inputs replaced by undergrounds
+rows, area, ins, outs = south_rows(2, 2, 12, 10, band=[2], sym='#')
+check('2->2 rock wall at inputs', rows, area, ins, outs, post=marks_match({'transport-belt'}))
+
+# a count without hand-drawn template
+rows, area, ins, outs = south_rows(6, 6, 24, 18)
+check('6->6 generated', rows, area, ins, outs)
+
+# remove-last also takes back the deconstruction marks
+rows, area, ins, outs = south_rows(2, 2, 12, 10, band=[6, 7, 8])
+msgs, created, full = scenario(rows, area)
+lua.eval('HANDLERS["lbb-remove-last"]')(lua.table(player_index=1))
+still = [e for e in lua.eval('ENTITIES').values() if e.marked]
+good = bool(created) and not still
+print(('PASS ' if good else 'FAIL ') + f'remove-last cancels marks ({len(still)} still marked)')
+ok_all &= good
 
 # alt-select removes only our ghosts
 g = grid(12, 16)

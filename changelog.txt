@@ -1,4 +1,14 @@
 ---------------------------------------------------------------------------------------------------
+Version: 0.2.0
+Date: 2026-10-04
+  Features:
+    - Any number of inputs and outputs from 1 to 16: counts without a hand-drawn design get a generated balancer (butterfly core, loop-backs for spare outputs, input merging when there are more inputs than outputs).
+    - Routes use underground belts when plain belts can't get through (under other belts, rocks, water, cliffs).
+    - Routes may turn an input end, an output start or a balancer port into an underground belt of the same direction.
+    - Trees, rocks and cliffs (with cliff explosives) under the planned layout are marked for deconstruction; removing the planned balancer cancels the marks.
+  Changes:
+    - 4 -> 3 is now supported.
+---------------------------------------------------------------------------------------------------
 Version: 0.1.0
 Date: 2026-10-04
   Features:
