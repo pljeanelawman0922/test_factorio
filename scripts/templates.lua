@@ -6,6 +6,8 @@
 -- Cells are separated by whitespace. Symbols:
 --   ^ > v <   transport belt facing that way
 --   S s       splitter facing north: S = left (west) half, s = right half
+--   K / k     splitter facing east: K = left (north) half, k = the tile below
+--   J / j     splitter facing west: J = left (south) half, j = the tile above
 --   D         underground belt entrance ("input")  facing north
 --   U         underground belt exit     ("output") facing north
 --   e / E     underground entrance / exit facing east
@@ -50,6 +52,23 @@ return {
       "^ .",
       "S s",
       "^ ^",
+    },
+  },
+  {
+    -- A (bottom) takes the input and a loop; its left output goes to the
+    -- sideways splitter H, which feeds output 1 and loops back into A; its
+    -- right output goes to B, which feeds outputs 2 and 3. Each output gets
+    -- exactly a third.
+    name = "1x3",
+    inputs = 1, outputs = 3,
+    note = "1 → 3 splitter (loop-back)",
+    grid = {
+      ". ^ ^ ^",
+      "> ^ S s",
+      "^ j < ^",
+      "v J S s",
+      "> > ^ ^",
+      ". . . ^",
     },
   },
   {

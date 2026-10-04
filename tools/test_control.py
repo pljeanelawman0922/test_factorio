@@ -342,8 +342,11 @@ check('2->2 through trees', rows, area, ins, outs, post=marks_match({'tree'}))
 def tunnels_no_marks(created):
     if any(e.marked for e in lua.eval('ENTITIES').values()):
         return 'something was marked'
-    if not any(e.ghost_type == 'underground-belt' and int(e.position.y) in (5, 8) for e in created):
-        return 'no underground under the cliffs'
+    ugs = [e for e in created if e.ghost_type == 'underground-belt']
+    above = {int(e.position.x) for e in ugs if e.position.y < 6}
+    below = {int(e.position.x) for e in ugs if e.position.y > 8}
+    if not above & below:
+        return 'no underground pair under the cliffs'
     return None
 
 
@@ -358,6 +361,26 @@ check('2->2 rock wall at inputs', rows, area, ins, outs, post=marks_match({'tran
 # a count without hand-drawn template
 rows, area, ins, outs = south_rows(6, 6, 24, 18)
 check('6->6 generated', rows, area, ins, outs)
+
+# bug report screenshot (+1 row): single belts lying inside the selection
+rows = ['. . . . . . . . . .',
+        '. . . . . . . . . .',
+        '. . . . . . . > . .',
+        '. . . . . . . > . .',
+        '. . > . . . . > . .',
+        '. . . . . . . . . .']
+check('1->3 belts inside the selection', rows, (0, 0, 9, 5), [(2, 4)], [(7, 2), (7, 3), (7, 4)])
+# third screenshot: the belts themselves are the balancer's ports
+rows = ['. . . . . . .', '. . . . . . .', '. . . . . . >', '. . . . . . >', '. > . . . . >', '. . . . . . .']
+check('1->3 tight (screenshot 3)', rows, (0, 0, 6, 5), [(1, 4)], [(6, 2), (6, 3), (6, 4)],
+      post=lambda c: None if len(c) == 13 else f'{len(c)} ghosts, expected 13 (3 splitters + 10 belts)')
+
+# too small: refused, with the design size and a selection size that works
+rows = ['. . . . . >', '. . . . . >', '. . . . . >', '> . . . . .']
+msgs, created, full = scenario(rows, (0, 0, 5, 3))
+good = not created and 'lbb.try-size(8, 6, 1)' in msgs[-1] and 'lbb.no-room(1, 3, 4, 6)' in msgs[-1]
+print(('PASS ' if good else 'FAIL ') + f'size hint: {msgs[-1]}')
+ok_all &= good
 
 # remove-last also takes back the deconstruction marks
 rows, area, ins, outs = south_rows(2, 2, 12, 10, band=[6, 7, 8])
