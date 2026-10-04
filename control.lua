@@ -22,6 +22,12 @@ local function init_storage()
   storage.builds = storage.builds or {}
   -- planning in progress, per player: spread over ticks (see on_tick)
   storage.jobs = storage.jobs or {}
+  -- progress windows of plans that no longer exist
+  for _, player in pairs(game.players) do
+    if not storage.jobs[player.index] and player.gui.screen.lbb_progress then
+      player.gui.screen.lbb_progress.destroy()
+    end
+  end
 end
 script.on_init(init_storage)
 script.on_configuration_changed(init_storage)
@@ -226,6 +232,11 @@ local run_job, place_plan
 local function on_select(event)
   local player = game.get_player(event.player_index)
   if not player then return end
+  -- one plan at a time per player; cancel it with the button in its window
+  if storage.jobs[player.index] then
+    tell(player, {"lbb.busy"}, false)
+    return
+  end
   local surface, force = event.surface, player.force
   local tiles = area_to_tiles(event.area)
 
@@ -266,9 +277,9 @@ local function on_select(event)
     tell(player, reason, false)
     return
   end
-  -- a new selection replaces one still being planned
   storage.jobs[player.index] = {P = P, surface = surface, force = force, tier = tier,
-                                entities = entities, started = game.tick}
+                                entities = entities, started = game.tick,
+                                n_in = #P.inputs, n_out = #P.outputs}
   run_job(player.index)
 end
 
@@ -344,27 +355,75 @@ end
 
 -- Advances player `idx`'s planning by one slice of work. Small plans
 -- finish in the tick they were started.
-run_job = function(idx)
+------------------------------------------------------------- progress
+
+local GUI = "lbb_progress"
+
+local function close_progress(player)
+  if player and player.valid and player.gui.screen[GUI] then player.gui.screen[GUI].destroy() end
+end
+
+-- A small window: progress bar, elapsed / limit seconds, Cancel button.
+local function show_progress(player, job, limit)
+  local frame = player.gui.screen[GUI]
+  if not frame then
+    frame = player.gui.screen.add{type = "frame", name = GUI, direction = "vertical",
+                                  caption = {"lbb.progress-title", job.n_in, job.n_out}}
+    frame.add{type = "progressbar", name = "bar", value = 0}
+    frame.bar.style.horizontally_stretchable = true
+    local row = frame.add{type = "flow", name = "row", direction = "horizontal"}
+    row.add{type = "label", name = "text"}
+    row.add{type = "empty-widget", name = "gap"}.style.horizontally_stretchable = true
+    row.add{type = "button", name = "lbb_cancel", caption = {"lbb.cancel"}}
+    frame.style.minimal_width = 320
+    frame.force_auto_center()
+  end
+  local value, stage = planner.progress(job.P)
+  frame.bar.value = value
+  local secs = math.floor((game.tick - job.started) / 60)
+  frame.row.text.caption = {stage == "hint" and "lbb.progress-hint" or "lbb.progress-text",
+                            math.floor(value * 100), secs, limit}
+end
+
+-- Advances player `idx`'s planning by one slice of work. Small plans
+-- finish in the tick they were started.
+run_job = function(idx, budget)
   local job = storage.jobs[idx]
   if not job then return end
   local player = game.get_player(idx)
   if not (player and player.valid and job.surface.valid) then
     storage.jobs[idx] = nil
+    close_progress(player)
     return
   end
-  local budget = settings.global["lbb-work-per-tick"].value
-  local blocked = make_blocked(job.surface, job.force, job.tier.belt)
-  local res, reason, hint = planner.step(job.P, budget, blocked)
+  budget = budget or settings.global["lbb-work-per-tick"].value
+  local limit = settings.global["lbb-time-limit"].value
+  local res, reason, hint
+  if game.tick - job.started >= limit * 60 then
+    -- out of time: use the best layout found so far, if any
+    res = planner.stop(job.P)
+    if not res then
+      res = false
+      -- already past the main search (only the size hint was left): say why
+      reason = (not job.P.main and job.P.reason) or {"lbb.timeout", limit}
+    end
+    job.timed_out = true
+  else
+    local blocked = make_blocked(job.surface, job.force, job.tier.belt)
+    res, reason, hint = planner.step(job.P, budget, blocked)
+  end
   if res == nil then
-    if not job.told then
-      job.told = true
-      player.create_local_flying_text{text = {"lbb.planning"}, create_at_cursor = true}
+    -- refresh the window a few times a second
+    if not player.gui.screen[GUI] or (game.tick - job.started) % 10 == 0 then
+      show_progress(player, job, limit)
     end
     return
   end
   storage.jobs[idx] = nil
+  close_progress(player)
   if res then
     place_plan(player, job, res)
+    if job.timed_out then tell(player, {"lbb.timeout-best", limit}, true) end
   else
     if hint then reason = {"", reason, " ", {"lbb.try-size", hint[1], hint[2], hint[3]}} end
     tell(player, reason, false)
@@ -376,7 +435,19 @@ script.on_event(defines.events.on_tick, function()
   local ids = {}
   for idx in pairs(storage.jobs) do ids[#ids + 1] = idx end
   table.sort(ids)
-  for _, idx in ipairs(ids) do run_job(idx) end
+  -- the work per tick is shared by everyone planning at the same time
+  local share = math.max(50, math.floor(settings.global["lbb-work-per-tick"].value / #ids))
+  for _, idx in ipairs(ids) do run_job(idx, share) end
+end)
+
+script.on_event(defines.events.on_gui_click, function(event)
+  if not (event.element and event.element.valid and event.element.name == "lbb_cancel") then return end
+  local player = game.get_player(event.player_index)
+  if storage.jobs[event.player_index] then
+    storage.jobs[event.player_index] = nil
+    tell(player, {"lbb.cancelled"}, true)
+  end
+  close_progress(player)
 end)
 
 local function on_alt_select(event)

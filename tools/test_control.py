@@ -14,7 +14,8 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), 
 MOCK = r'''
 defines = {
   direction = {north = 0, northeast = 2, east = 4, southeast = 6, south = 8, southwest = 10, west = 12, northwest = 14},
-  events = {on_player_selected_area = 101, on_player_alt_selected_area = 102, on_tick = 103},
+  events = {on_player_selected_area = 101, on_player_alt_selected_area = 102, on_tick = 103,
+            on_gui_click = 104},
   build_check_type = {script = 0, manual = 1, manual_ghost = 2, script_ghost = 3, blueprint_ghost = 4, ghost_revive = 5},
 }
 local function proto(name, type, speed, extra)
@@ -47,15 +48,34 @@ script = {
 storage = {}
 MESSAGES = {}
 FORCE = {name = "player", recipes = {["cliff-explosives"] = {enabled = false}}}
-settings = {global = {["lbb-work-per-tick"] = {value = WORK_PER_TICK or 500}}}
+settings = {global = {["lbb-work-per-tick"] = {value = WORK_PER_TICK or 500},
+                     ["lbb-time-limit"] = {value = 20}}}
+-- a tiny GUI: named children reachable as fields, style, destroy
+local function gui_element(parent, spec)
+  local e = {type = spec.type, name = spec.name, caption = spec.caption, value = spec.value,
+             valid = true, style = {}, children = {}}
+  setmetatable(e, {__index = function(t, k) return rawget(t, "children")[k] end})
+  e.add = function(sp)
+    local c = gui_element(e, sp)
+    if sp.name then e.children[sp.name] = c end
+    return c
+  end
+  e.destroy = function()
+    e.valid = false
+    if parent and e.name then parent.children[e.name] = nil end
+  end
+  e.force_auto_center = function() end
+  return e
+end
 PLAYER = {
   index = 1, force = FORCE, valid = true,
   mod_settings = {["lbb-tier"] = {value = "fastest"}, ["lbb-verbose"] = {value = true}},
   print = function(m) MESSAGES[#MESSAGES + 1] = m end,
+  gui = {screen = gui_element(nil, {type = "screen"})},
   create_local_flying_text = function(t) end,
   play_sound = function(t) end,
 }
-game = {get_player = function(i) return PLAYER end, tick = 0}
+game = {get_player = function(i) return PLAYER end, tick = 0, players = {PLAYER}}
 -- run ticks until no planning job is left; returns the number of ticks
 function run_ticks()
   local n = 0
@@ -413,6 +433,84 @@ still = [e for e in lua.eval('ENTITIES').values() if e.marked]
 good = bool(created) and not still
 print(('PASS ' if good else 'FAIL ') + f'remove-last cancels marks ({len(still)} still marked)')
 ok_all &= good
+
+# ------------------------------------------------ progress window, busy, cancel, time limit
+lua.execute('''
+function select_area(x1, y1, x2, y2)
+  HANDLERS[defines.events.on_player_selected_area]{player_index = 1, item = "lbb-balancer-tool",
+    surface = SURFACE, area = {left_top = {x = x1, y = y1}, right_bottom = {x = x2 + 1, y = y2 + 1}},
+    entities = {}}
+end
+function tick_once()
+  game.tick = game.tick + 1
+  HANDLERS[defines.events.on_tick]({tick = game.tick})
+end
+function window() return PLAYER.gui.screen.lbb_progress end
+function last_message()
+  local m = MESSAGES[#MESSAGES]
+  if type(m) ~= "table" then return tostring(m) end
+  local function flat(x)
+    if type(x) ~= "table" then return tostring(x) end
+    local parts = {}
+    for i = 2, #x do parts[#parts + 1] = flat(x[i]) end
+    return x[1] .. "(" .. table.concat(parts, ", ") .. ")"
+  end
+  return flat(m)
+end
+''')
+
+
+def setup(rows):
+    lua.execute('ENTITIES = {}; ROCKS = {}; MESSAGES = {}')
+    for y, row in enumerate(rows):
+        for x, c in enumerate(row.split()):
+            if c in SYM:
+                lua.eval('add_belt')('transport-belt', x, y, DEF[SYM[c]])
+
+
+def report(name, good, detail=''):
+    global ok_all
+    print(('PASS ' if good else 'FAIL ') + name + (f': {detail}' if detail else ''))
+    ok_all &= good
+
+
+lua.execute('settings.global["lbb-work-per-tick"].value = 100')
+rows, area, ins, outs = south_rows(6, 6, 24, 18)
+setup(rows)
+lua.eval('select_area')(*area)
+for _ in range(15):
+    lua.eval('tick_once')()
+win = lua.eval('window()')
+bar1 = win.bar.value if win else None
+report('progress window while planning', bool(win) and 0 <= bar1 <= 1,
+       f'bar {bar1}, "{lua.eval("window() and window().row.text.caption[1]")}"')
+# a second selection is refused and keeps the running plan
+lua.execute('JOB_BEFORE = storage.jobs[1]')
+lua.eval('select_area')(*area)
+report('busy: second selection refused', 'lbb.busy' in lua.eval('last_message()')
+       and lua.eval('storage.jobs[1] == JOB_BEFORE'), lua.eval('last_message()'))
+for _ in range(60):
+    lua.eval('tick_once')()
+bar2 = lua.eval('window() and window().bar.value')
+report('progress grows', bar2 is not None and bar2 >= bar1, f'{bar1} -> {bar2}')
+# Cancel
+lua.eval('HANDLERS[defines.events.on_gui_click]')(lua.eval('{player_index = 1, element = window().row.lbb_cancel}'))
+report('cancel stops the plan and closes the window',
+       lua.eval('storage.jobs[1] == nil and window() == nil') and 'lbb.cancelled' in lua.eval('last_message()'))
+
+# time limit: 1 s with very little work per tick
+lua.execute('settings.global["lbb-work-per-tick"].value = 50; settings.global["lbb-time-limit"].value = 1')
+setup(rows)
+lua.eval('select_area')(*area)
+ticks = 0
+while lua.eval('storage.jobs[1] ~= nil') and ticks < 200:
+    lua.eval('tick_once')()
+    ticks += 1
+msg = lua.eval('last_message()')
+placed = [e for e in lua.eval('ENTITIES').values() if e.created and e.valid]
+report('time limit stops planning', ticks <= 61 and lua.eval('window() == nil')
+       and ('lbb.timeout' in msg or 'lbb.placed' in msg), f'{ticks} ticks, {msg[:60]}, {len(placed)} ghosts')
+lua.execute('settings.global["lbb-work-per-tick"].value = 500; settings.global["lbb-time-limit"].value = 20')
 
 # alt-select removes only our ghosts
 g = grid(12, 16)

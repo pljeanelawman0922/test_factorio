@@ -18,6 +18,16 @@ data:extend({
     order = "c",
   },
   {
+    -- planning that takes longer stops (placing the best layout found so far)
+    type = "int-setting",
+    name = "lbb-time-limit",
+    setting_type = "runtime-global",
+    default_value = 20,
+    minimum_value = 1,
+    maximum_value = 600,
+    order = "d",
+  },
+  {
     type = "bool-setting",
     name = "lbb-verbose",
     setting_type = "runtime-per-user",
