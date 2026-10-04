@@ -10,6 +10,7 @@ Date: 2026-10-04
     - Compact 1 -> 3 splitter (4 x 6, three splitters, one of them sideways).
     - A balancer's input / output belt may be an existing belt end facing the same way (not rebuilt).
     - When the balancer doesn't fit, the message names the design size and a selection size that works.
+    - Designs with unused inputs are avoided when a smaller one fits (2 belts -> 4 now builds 2 -> 4, not 4 -> 4).
   Changes:
     - 4 -> 3 is now supported.
 ---------------------------------------------------------------------------------------------------

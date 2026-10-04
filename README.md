@@ -83,6 +83,13 @@ generated designs are throughput limited: they balance exactly, but under
 some uneven loads they move less than the full input. Merged inputs are not
 drawn evenly when the outputs back up.
 
+Balanced means equal *amounts* per output, not mixed *items*. When both
+inputs of a splitter are full, the game passes them almost straight
+through, so with different items on the input belts the outputs can carry
+different items even though each carries the same number. Designs with
+spare inputs are only used when one without spare inputs doesn't fit
+(e.g. 2 → 4 instead of 4 → 4 for two belts).
+
 ## How it works
 
 ```
