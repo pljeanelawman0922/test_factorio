@@ -13,6 +13,7 @@ the way for removal, and places ghosts for your robots (or you) to build.
 | Plan a balancer | Drag over the belt ends (or the gap between them) |
 | Remove planned ghosts in an area | **Shift + drag** with the tool |
 | Remove the last planned balancer | **Shift + Alt + B** |
+| Stop a plan that is still being calculated | **Cancel** in its progress window |
 
 Set up the belts first:
 
@@ -158,8 +159,14 @@ most "Planning work per tick" units (map setting, default 500, about one
 route search step each; roughly 10 ms). Every part of the search can stop
 and resume: the placement scan, each candidate's route negotiation and each
 single route search. The whole state lives in `storage` as plain data, so
-saving mid-plan and multiplayer stay deterministic. A new selection replaces
-one still being planned.
+saving mid-plan and multiplayer stay deterministic.
+
+While a plan runs, a small window shows a progress bar, the elapsed time
+and a Cancel button. A new selection is refused until the plan finishes
+or is cancelled. Planning stops after "Planning time limit" seconds (map
+setting, default 20): if a working layout was found by then, the best one
+so far is placed, otherwise you get a message. Several players planning at
+the same time share the work per tick.
 
 ## Files
 

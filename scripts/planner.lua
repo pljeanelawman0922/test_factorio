@@ -183,7 +183,9 @@ local function analyse(var)
   return var
 end
 
-local variant_cache = setmetatable({}, {__mode = "k"})
+-- plain table: templates live for the whole game (a weak table here made
+-- Lua 5.2's collector stall for minutes now and then)
+local variant_cache = {}
 local function variants_of(tpl)
   if variant_cache[tpl] then return variant_cache[tpl] end
   local parsed = parse_template(tpl)
@@ -963,12 +965,13 @@ local function search_new(world, inputs, outputs, tier)
   local ocx, ocy = centroid(outputs, "x", "y")
   local budget = world.budget or {}
   world._work = {n = budget.work or 600000}
+  local work0 = world._work.n
   return {world = world, inputs = inputs, outputs = outputs, n = n, m = m, tpls = tpls,
           bc = {}, phase = "scan", ti = 1, vi = 1, cands = {},
           dir_votes = dir_votes, input_start = input_start, input_end = input_end,
           output_tile = output_tile, icx = icx, icy = icy, ocx = ocx, ocy = ocy,
           route_ug = (world.ug_max or 5) >= 2 and not world.no_route_ug,
-          max_c = budget.candidates or 100, max_s = budget.successes or 3}
+          max_c = budget.candidates or 100, max_s = budget.successes or 3, work0 = work0}
 end
 
 -- Port centroids of a variant (cached on the variant).
@@ -1277,6 +1280,44 @@ function planner.step(P, tick, blocked)
     P.sub = nil
     if ok then return false, P.reason, {w + 2 * P.grow, h + 2 * P.grow, P.grow} end
   end
+end
+
+-- Rough share of a search done, 0..1.
+local function search_progress(S)
+  if S.phase == "scan" then
+    local per = 1 / math.max(#S.tpls, 1)
+    return 0.2 * per * ((S.ti - 1) + math.min(S.vi - 1, 8) / 8)
+  end
+  local total = math.max(math.min(#S.cands, S.max_c), 1)
+  local tried = math.min((S.ci or 1) - 1, total) / total
+  local work = 1 - math.max(S.world._work.n, 0) / S.work0
+  return 0.2 + 0.8 * math.max(tried, work)
+end
+
+-- Progress of a plan for display: fraction 0..1 and a stage name
+-- ("search" or "hint": looking for a selection size that works).
+function planner.progress(P)
+  if P.main then
+    -- usually the first tier of designs succeeds: give it most of the bar;
+    -- fallback tiers continue from where it stopped
+    local base = ({0, 0.6, 0.8})[P.tier or 1] or 0.8
+    local span = ({0.6, 0.2, 0.15})[P.tier or 1] or 0.15
+    return math.min(0.95, base + span * search_progress(P.main)), "search"
+  end
+  local g = math.max(P.grow or 1, 1)
+  local done = P.sub and search_progress(P.sub) or 0
+  return math.min(1, ((g - 1) + done) / 3), "hint"
+end
+
+-- Stops a plan early (time limit): the best layout found so far, or nil.
+function planner.stop(P)
+  local S = P.main
+  if S and S.best then
+    S.run = nil
+    finish(S)
+    return S.plan
+  end
+  return nil
 end
 
 -- Plans in one go (tests, and anything that doesn't mind the wait).

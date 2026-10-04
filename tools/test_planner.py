@@ -153,6 +153,31 @@ def run(name, rows, area, expect_ok=True, lane=None, ug_max=5, expect=None, hand
     return ok
 
 
+def verify_plan(name, plan, rows, area):
+    """merge a plan into its world and check it with the simulator"""
+    ents, _, _ = parse_world(rows)
+    full = dict(ents)
+    pe = plan.entities
+    sid = 5000
+    for i in range(1, len(pe) + 1):
+        e = pe[i]
+        if e.kind == 'belt':
+            full[(e.x, e.y)] = {'kind': 'belt', 'dir': e.dir}
+        elif e.kind == 'ug':
+            full[(e.x, e.y)] = {'kind': 'ug', 'dir': e.dir, 'io': e.io}
+        else:
+            sid += 1
+            full[(e.x, e.y)] = {'kind': 'splitter', 'dir': e.dir, 'half': 'L', 'id': sid}
+            full[(e.x2, e.y2)] = {'kind': 'splitter', 'dir': e.dir, 'half': 'R', 'id': sid}
+    ins = [(plan.inputs[i].x, plan.inputs[i].y) for i in range(1, len(plan.inputs) + 1)]
+    outs = [(plan.outputs[i].x, plan.outputs[i].y) for i in range(1, len(plan.outputs) + 1)]
+    ok, msgs = check_balancer(full, ins, outs, bool(plan.template.lane), '', quiet=True)
+    print(('PASS' if ok else 'FAIL') + f' {name}: {plan.template.name} {len(pe)} entities')
+    for m in msgs[:4]:
+        print('    ', m)
+    return ok
+
+
 def draw(full, rows, area):
     h = len(rows)
     w = max(len(r.split()) for r in rows)
@@ -571,8 +596,45 @@ def fuzz_big(seed, count):
     return ok
 
 
+stop_early = lua.eval('''
+function(world, tick)
+  -- step until a layout exists, then stop as the time limit would
+  local blocked = world.blocked
+  world.blocked = nil
+  local P = planner_mod.start(world)
+  local seen = {}
+  while true do
+    local p = planner_mod.progress(P)
+    seen[#seen + 1] = p
+    if P.main and P.main.best then return planner_mod.stop(P), seen end
+    local res = planner_mod.step(P, tick, blocked)
+    if res ~= nil then return res or nil, seen end
+  end
+end''')
+
+
+def check_stop_early():
+    """planner.stop hands back a complete, balanced layout; progress stays in 0..1"""
+    rows, area = scenario_straight(4, 4, gap=14, w=14)
+    g = [r.split() for r in rows]
+    for x in range(len(g[0])):
+        g[3][x] = '<'
+        g[12][x] = '>'
+    rows, area = rows_of(g), (1, area[1], area[2] - 1, area[3])
+    ents, lents, rocks = parse_world(rows)
+    plan, seen = stop_early(make_world(lua_list(lents), lua_list(rocks), *area, 5), 200)
+    seen = [seen[i] for i in range(1, len(seen) + 1)]
+    good = plan is not None and all(0 <= v <= 1 for v in seen)
+    print(('PASS' if good else 'FAIL') + f' stop early: layout after {len(seen)} steps, progress '
+          f'{seen[0]:.2f}..{max(seen):.2f}')
+    if good:
+        # the early layout must be as valid as any other
+        good &= verify_plan('stop early layout', plan, rows, area)
+    return good
+
+
 def stepwise_checks():
-    ok = True
+    ok = check_stop_early()
     for n, m, gap in [(2, 2, 10), (4, 4, 14), (3, 3, 14), (6, 6, 24), (1, 1, 10)]:
         rows, area = scenario_straight(n, m, gap=gap, w=max(n, m) + 10)
         ok &= check_stepwise(f'{n}->{m}', rows, area)

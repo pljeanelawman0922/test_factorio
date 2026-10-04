@@ -20,6 +20,12 @@ Date: 2026-10-04
     - Designs whose undergrounds are longer than the belt tier reaches are skipped (they were reported as "no room").
     - Generated N -> M with M = M' x 2^k (M' >= N): an N -> M' balancer plus splitter trees, e.g. 3 -> 12 is 13 x 18 instead of 28 x 42.
     - Larger search budget (100 placements, 600000 work units) with cheaper failures; big selections such as a 3 -> 12 train loading station now plan.
+    - Progress window while planning (progress bar, time, Cancel button).
+    - A new selection is refused while the previous plan is still running.
+    - Planning time limit (map setting, default 20 s): when it is reached, the best layout found so far is placed, if any.
+    - Players planning at the same time share the work per tick.
+  Bugfixes:
+    - Fixed planning occasionally stalling for minutes when designs were first loaded (weak-keyed cache in the planner).
     - Templates support south-facing undergrounds and splitters facing every direction.
   Changes:
     - 4 -> 3 is now supported.
