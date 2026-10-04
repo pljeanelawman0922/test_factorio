@@ -43,7 +43,7 @@ local function key(x, y) return (x + OFF) * MUL + (y + OFF) end
 ----------------------------------------------------------------- templates
 
 local UGSYM = {D = {0, "in"}, U = {0, "out"}, e = {1, "in"}, E = {1, "out"},
-               w = {3, "in"}, W = {3, "out"}}
+               d = {2, "in"}, u = {2, "out"}, w = {3, "in"}, W = {3, "out"}}
 local BELTSYM = {["^"] = 0, [">"] = 1, ["v"] = 2, ["<"] = 3}
 
 local function split_cells(row)
@@ -83,7 +83,11 @@ local function parse_template(tpl)
         -- facing west: J = left (south) half, j right above it
         assert(at(x, y - 1) == "j", tpl.name .. ": J without j above")
         ents[#ents + 1] = {kind = "splitter", x = lx, y = ly, x2 = lx, y2 = ly - 1, dir = 3}
-      elseif c ~= "." and c ~= "k" and c ~= "j" then
+      elseif c == "Q" then
+        -- facing south: Q = left (east) half, q right left of it
+        assert(cells[x - 1] == "q", tpl.name .. ": Q without q on its left")
+        ents[#ents + 1] = {kind = "splitter", x = lx, y = ly, x2 = lx - 1, y2 = ly, dir = 2}
+      elseif c ~= "." and c ~= "k" and c ~= "j" and c ~= "q" then
         error(tpl.name .. ": unknown template symbol " .. c)
       end
       x = x + 1
@@ -454,7 +458,11 @@ local H_WEIGHT = 1.001
 --                     cost = fn(kk, axis) -> extra cost of an underground over kk}}
 -- Returns a list of {x, y, dir, kind = "belt"|"ug", io = "in"|"out",
 -- replace = true for a replaced input/output belt} (may be empty) or nil.
-local function route(job, ctx, max_nodes, work)
+-- Resumable: A holds the search (pass {} to start); with `limit`, at most
+-- that many nodes are expanded per call and "pause" is returned when the
+-- search isn't finished yet (call again with the same A).
+local function route(job, ctx, max_nodes, work, A, limit)
+  A = A or {}
   local passable, tilecost, ug = ctx.passable, ctx.tilecost, ctx.ug
   local function entry_ok(d)
     return d == job.tdir or (job.side_ok and d ~= opp(job.tdir))
@@ -466,7 +474,9 @@ local function route(job, ctx, max_nodes, work)
   local function hdist(x, y) return math.abs(x - job.tx) + math.abs(y - job.ty) end
   local function skey(kk, din, exit) return kk * 8 + din * 2 + (exit and 1 or 0) end
 
-  local open, best, closed = {}, {}, {}
+  local fresh = A.open == nil
+  if fresh then A.open, A.best, A.closed, A.expanded = {}, {}, {}, 0 end
+  local open, best, closed = A.open, A.best, A.closed
   local function push(n)
     local sk = skey(key(n.x, n.y), n.din, n.exit)
     if best[sk] and best[sk] <= n.g then return end
@@ -474,18 +484,21 @@ local function route(job, ctx, max_nodes, work)
     n.f = n.g + H_WEIGHT * hdist(n.x, n.y)
     heap_push(open, n)
   end
-  if passable(job.sx, job.sy) then
-    local c0 = tilecost and tilecost(key(job.sx, job.sy)) or 1
-    push({x = job.sx, y = job.sy, din = job.sdir, g = c0})
-  end
-  if ug and job.ug_start then
-    -- the input end itself becomes an underground entrance (same direction)
-    push({x = job.ug_start[1], y = job.ug_start[2], din = job.sdir, g = REPLACE_COST,
-          only_jump = true, replace = true})
+  if fresh then
+    if passable(job.sx, job.sy) then
+      local c0 = tilecost and tilecost(key(job.sx, job.sy)) or 1
+      push({x = job.sx, y = job.sy, din = job.sdir, g = c0})
+    end
+    if ug and job.ug_start then
+      -- the input end itself becomes an underground entrance (same direction)
+      push({x = job.ug_start[1], y = job.ug_start[2], din = job.sdir, g = REPLACE_COST,
+            only_jump = true, replace = true})
+    end
   end
 
-  local expanded = 0
+  local this_call = 0
   while #open > 0 do
+    if limit and this_call >= limit then return "pause" end
     local n = heap_pop(open)
     if n.goal then
       local chain = {}
@@ -512,8 +525,9 @@ local function route(job, ctx, max_nodes, work)
     local sk = skey(key(n.x, n.y), n.din, n.exit)
     if not closed[sk] then
       closed[sk] = true
-      expanded = expanded + 1
-      if expanded > max_nodes then return nil end
+      A.expanded = A.expanded + 1
+      this_call = this_call + 1
+      if A.expanded > max_nodes then return nil end
       if work then
         work.n = work.n - 1
         if work.n <= 0 then return nil end
@@ -631,10 +645,16 @@ local function assign_outputs(outs, ports, flow)
   return pairs, cost
 end
 
--- Try to route every job of a placed candidate. Returns entity list, cost
--- or nil. clear_at(kk) -> extra cost of clearing tile kk (trees, rocks).
+------------------------------------------------------------- candidates
+--
+-- Everything below is resumable: a search keeps its state in plain tables
+-- (no functions), so control.lua can keep it in `storage` and spread the
+-- work over several ticks. Callbacks into the game (`blocked`) are passed
+-- in on every step instead of being stored.
+
+-- Routing state for one placed candidate, or nil if it can't work at all.
 -- use_ug: routes may use underground belts.
-local function try_candidate(world, cand, free, clear_at, use_ug)
+local function cand_init(world, cand, use_ug)
   local var, ox, oy = cand.var, cand.ox, cand.oy
   local tocc = {}
   for _, t in ipairs(var.tiles) do tocc[key(t[1] + ox, t[2] + oy)] = true end
@@ -662,11 +682,9 @@ local function try_candidate(world, cand, free, clear_at, use_ug)
 
   -- tiles pushed into by the template that routes must not use
   local tfed = {}
-  for _, pr in ipairs(cand.out_pairs) do tfed[key(pr[1].fx, pr[1].fy)] = pr end
+  for _, pr in ipairs(cand.out_pairs) do tfed[key(pr[1].fx, pr[1].fy)] = true end
 
-  local area = world.area
-  local occ, fed, wspans = world._occ, world._fed, world._spans
-
+  local fed = world._fed
   local jobs = {}
   for _, pr in ipairs(cand.in_pairs) do
     local inp, port = pr[1], pr[2]
@@ -696,23 +714,63 @@ local function try_candidate(world, cand, free, clear_at, use_ug)
   -- reserve each job's start tile (it is forced: something pushes into it)
   local reserved = {}
   for i, j in ipairs(jobs) do reserved[key(j.sx, j.sy)] = i end
-  local n = #jobs
 
-  -- hard constraints for job ji
-  local function make_passable(ji)
-    local job = jobs[ji]
+  local order = {}
+  for i = 1, #jobs do order[i] = i end
+  table.sort(order, function(p, q)
+    local jp, jq = jobs[p], jobs[q]
+    local dp, dq = manhattan(jp.sx, jp.sy, jp.tx, jp.ty), manhattan(jq.sx, jq.sy, jq.tx, jq.ty)
+    if dp ~= dq then return dp < dq end
+    return p < q
+  end)
+
+  return {cand = cand, use_ug = use_ug, tocc = tocc, used_port = used_port, tspan = tspan,
+          tfed = tfed, jobs = jobs, reserved = reserved, order = order,
+          iter = 1, oi = 1, present = 0.5, stall = 0,
+          usage = {}, history = {}, paths = {},
+          ax_use = {[0] = {}, [1] = {}}, ax_hist = {[0] = {}, [1] = {}}}
+end
+
+-- every (map, key) a path claims
+local function claims(R, path)
+  local list = {}
+  for i, p in ipairs(path) do
+    list[#list + 1] = {R.usage, key(p.x, p.y)}
+    if p.kind == "ug" and p.io == "in" then
+      local q = path[i + 1]
+      local axis = p.dir % 2
+      local len = math.abs(q.x - p.x) + math.abs(q.y - p.y)
+      for k = 0, len do
+        list[#list + 1] = {R.ax_use[axis], key(p.x + DX[p.dir] * k, p.y + DY[p.dir] * k)}
+      end
+    end
+  end
+  return list
+end
+
+-- Negotiated congestion: route every job, letting them overlap at a price
+-- that rises each round, until no tile is shared. Undergrounds also claim
+-- their whole line (per axis) so two pairs never interleave.
+-- Routes jobs until `tick` work is used. Returns nil (not done yet), false
+-- (candidate fails) or true, entities, cost.
+local function cand_step(world, R, free, clear_at, tick)
+  local cand, jobs = R.cand, R.jobs
+  local var, ox, oy = cand.var, cand.ox, cand.oy
+  local area = world.area
+  local occ, fed, wspans = world._occ, world._fed, world._spans
+  local tocc, tspan, tfed, reserved = R.tocc, R.tspan, R.tfed, R.reserved
+
+  local function make_passable(job)
     return function(x, y)
       if not in_area(area, x, y) then return false end
       local kk = key(x, y)
       if tocc[kk] or not free(x, y) then return false end
-      local isstart = (x == job.sx and y == job.sy)
-      if isstart then return not job.blocked end
+      if x == job.sx and y == job.sy then return not job.blocked end
       if reserved[kk] then return false end
       if fed[kk] or tfed[kk] then return false end
       return true
     end
   end
-
   -- an underground may not end on, or pass under, a tile on the line of
   -- another underground with the same axis (it would pair with it)
   local function on_line(kk, axis)
@@ -728,169 +786,144 @@ local function try_candidate(world, cand, free, clear_at, use_ug)
     if e and e.kind == "ug" and e.dir % 2 == axis then return false end
     return not on_line(kk, axis)
   end
-
-  -- Negotiated congestion: route every job, letting them overlap at a
-  -- price that rises each round, until no tile is shared. Undergrounds
-  -- also claim their whole line (per axis) so two pairs never interleave.
-  local usage, history, paths = {}, {}, {}
-  local ax_use, ax_hist = {[0] = {}, {}}, {[0] = {}, {}}
-  local present = 0.5
+  local usage, history = R.usage, R.history
   local function tilecost(kk)
     local u = usage[kk] or 0
-    return (1 + clear_at(kk) + (history[kk] or 0)) * (1 + present * u)
+    return (1 + clear_at(kk) + (history[kk] or 0)) * (1 + R.present * u)
   end
   local ugctx
-  if use_ug then
+  if R.use_ug then
     ugctx = {
       max = world.ug_max or 5, end_ok = end_ok, pass_ok = pass_ok,
       cost = function(kk, axis)
-        return (ax_hist[axis][kk] or 0) + present * (ax_use[axis][kk] or 0)
+        return (R.ax_hist[axis][kk] or 0) + R.present * (R.ax_use[axis][kk] or 0)
       end,
     }
   end
-  local ctxs = {}
-  for i = 1, n do
-    ctxs[i] = {passable = make_passable(i), tilecost = tilecost, ug = ugctx}
-  end
 
-  -- every (map, key) a path claims
-  local function claims(path)
-    local list = {}
-    for i, p in ipairs(path) do
-      list[#list + 1] = {usage, key(p.x, p.y)}
-      if p.kind == "ug" and p.io == "in" then
-        local q = path[i + 1]
-        local axis = p.dir % 2
-        local len = math.abs(q.x - p.x) + math.abs(q.y - p.y)
-        for k = 0, len do
-          list[#list + 1] = {ax_use[axis], key(p.x + DX[p.dir] * k, p.y + DY[p.dir] * k)}
-        end
-      end
-    end
-    return list
-  end
-
-  local order = {}
-  for i = 1, n do order[i] = i end
-  table.sort(order, function(p, q)
-    local jp, jq = jobs[p], jobs[q]
-    return manhattan(jp.sx, jp.sy, jp.tx, jp.ty) < manhattan(jq.sx, jq.sy, jq.tx, jq.ty)
-  end)
   local max_nodes = world.max_nodes or 12000
-  local best_conf, stall = nil, 0
-  for _ = 1, (world.route_iterations or 12) do
-    for _, ji in ipairs(order) do
-      local old = paths[ji]
-      if old then
-        for _, c in ipairs(claims(old)) do c[1][c[2]] = c[1][c[2]] - 1 end
+  local start = world._work.n
+  while true do
+    if R.oi > #R.order then
+      -- end of a round: count and price the shared tiles
+      local nconf = 0
+      for _, pair in ipairs({{usage, history}, {R.ax_use[0], R.ax_hist[0]}, {R.ax_use[1], R.ax_hist[1]}}) do
+        for kk, u in pairs(pair[1]) do
+          if u > 1 then
+            nconf = nconf + 1
+            pair[2][kk] = (pair[2][kk] or 0) + 1
+          end
+        end
       end
-      local path = route(jobs[ji], ctxs[ji], max_nodes, world._work)
-      if not path then return nil end   -- unroutable even with overlaps
-      paths[ji] = path
-      for _, c in ipairs(claims(path)) do c[1][c[2]] = (c[1][c[2]] or 0) + 1 end
+      if nconf == 0 then break end
+      -- give up on this candidate when overlaps stop shrinking
+      if not R.best_conf or nconf < R.best_conf then R.best_conf, R.stall = nconf, 0
+      else R.stall = R.stall + 1 end
+      if R.stall >= 4 then return false end
+      R.present = R.present * 1.8
+      R.iter, R.oi = R.iter + 1, 1
+      if R.iter > (world.route_iterations or 12) then return false end
+    else
+      local ji = R.order[R.oi]
+      if not R.astar then
+        -- re-route this job: drop its old claims first
+        local old = R.paths[ji]
+        if old then
+          for _, c in ipairs(claims(R, old)) do c[1][c[2]] = c[1][c[2]] - 1 end
+        end
+        R.astar = {}
+      end
+      local ctx = {passable = make_passable(jobs[ji]), tilecost = tilecost, ug = ugctx}
+      local left = math.max(1, tick - (start - world._work.n))
+      local path = route(jobs[ji], ctx, max_nodes, world._work, R.astar, left)
+      if path == "pause" then return nil end
+      R.astar = nil
+      if not path then return false end   -- unroutable even with overlaps
+      R.paths[ji] = path
+      for _, c in ipairs(claims(R, path)) do c[1][c[2]] = (c[1][c[2]] or 0) + 1 end
+      R.oi = R.oi + 1
+      if start - world._work.n >= tick then return nil end
     end
-    local nconf = 0
-    for _, pair in ipairs({{usage, history}, {ax_use[0], ax_hist[0]}, {ax_use[1], ax_hist[1]}}) do
-      for kk, u in pairs(pair[1]) do
-        if u > 1 then
-          nconf = nconf + 1
-          pair[2][kk] = (pair[2][kk] or 0) + 1
-        end
-      end
-    end
-    if nconf == 0 then
-      -- template ports replaced by a route's underground are not built
-      local dropped = {}
-      for idx in pairs(cand.preset_in or {}) do dropped[idx] = true end
-      for idx in pairs(cand.preset_out or {}) do dropped[idx] = true end
-      for i = 1, n do
-        local path, job = paths[i], jobs[i]
-        local first, last = path[1], path[#path]
-        if job.port_start and first and first.replace then
-          dropped[job.port_start] = true
-          first.replace = nil
-        end
-        if job.port_end and last and last.replace then
-          dropped[job.port_end] = true
-          last.replace = nil
-        end
-      end
-      local ents, cost = {}, 0
-      for i, e in ipairs(var.ents) do
-        if not (e.port == "in" and not used_port[i]) and not dropped[i] then
-          local r = {kind = e.kind, x = e.x + ox, y = e.y + oy, dir = e.dir, io = e.io}
-          if e.x2 then r.x2, r.y2 = e.x2 + ox, e.y2 + oy end
-          ents[#ents + 1] = r
-        end
-      end
-      for i = 1, n do
-        local path = paths[i]
-        for pi, p in ipairs(path) do
-          ents[#ents + 1] = {kind = p.kind, x = p.x, y = p.y, dir = p.dir, io = p.io,
-                             replace = p.replace, route = i}
-          cost = cost + 1 + clear_at(key(p.x, p.y))
-          if p.kind == "ug" and p.io == "in" then cost = cost + UG_COST end
-          if pi > 1 and path[pi - 1].dir ~= p.dir then cost = cost + TURN_COST end
-        end
-      end
-      return ents, cost
-    end
-    -- give up on this candidate when overlaps stop shrinking
-    if not best_conf or nconf < best_conf then best_conf, stall = nconf, 0
-    else stall = stall + 1 end
-    if stall >= 4 then return nil end
-    present = present * 1.8
   end
-  return nil
+
+  -- no tile shared: build the entity list
+  local n = #jobs
+  local paths = R.paths
+  -- template ports replaced by a route's underground (or by an existing
+  -- belt end) are not built
+  local dropped = {}
+  for idx in pairs(cand.preset_in or {}) do dropped[idx] = true end
+  for idx in pairs(cand.preset_out or {}) do dropped[idx] = true end
+  local replace_ok = {}
+  for i = 1, n do
+    local path, job = paths[i], jobs[i]
+    local first, last = path[1], path[#path]
+    if job.port_start and first and first.replace then
+      dropped[job.port_start] = true
+      replace_ok[first] = false
+    end
+    if job.port_end and last and last.replace then
+      dropped[job.port_end] = true
+      replace_ok[last] = false
+    end
+  end
+  local ents, cost = {}, 0
+  for i, e in ipairs(var.ents) do
+    if not (e.port == "in" and not R.used_port[i]) and not dropped[i] then
+      local r = {kind = e.kind, x = e.x + ox, y = e.y + oy, dir = e.dir, io = e.io}
+      if e.x2 then r.x2, r.y2 = e.x2 + ox, e.y2 + oy end
+      ents[#ents + 1] = r
+    end
+  end
+  for i = 1, n do
+    local path = paths[i]
+    for pi, p in ipairs(path) do
+      local replace = p.replace
+      if replace_ok[p] == false then replace = nil end
+      ents[#ents + 1] = {kind = p.kind, x = p.x, y = p.y, dir = p.dir, io = p.io,
+                         replace = replace, route = i}
+      cost = cost + 1 + clear_at(key(p.x, p.y))
+      if p.kind == "ug" and p.io == "in" then cost = cost + UG_COST end
+      if pi > 1 and path[pi - 1].dir ~= p.dir then cost = cost + TURN_COST end
+    end
+  end
+  return true, ents, cost
 end
 
-local plan_for
+------------------------------------------------------------------ search
 
--- Returns plan, or nil, reason, hint. hint = {w, h, grow} when the same belt
--- ends could be connected in a selection grown by `grow` tiles on each side
--- (w x h tiles); only tried when the design doesn't fit or can't be routed.
-function planner.plan(world)
-  index_world(world)
-  local a = world.area
-  local w, h = a.x2 - a.x1 + 1, a.y2 - a.y1 + 1
-  if w > 64 or h > 64 then return nil, {"lbb.too-big", 64} end
-
-  local inputs, outputs = planner.detect(world)
-  local n, m = #inputs, #outputs
-  if n == 0 or m == 0 then return nil, {"lbb.no-ends", n, m} end
-
-  for _, inp in ipairs(inputs) do
-    if not in_area(a, inp.sx, inp.sy) then return nil, {"lbb.input-leaves", inp.x, inp.y} end
-  end
-
-  local plan, reason = plan_for(world, inputs, outputs)
-  if plan or world.no_hint then return plan, reason end
-  local key_ = reason[1]
-  if key_ ~= "lbb.no-room" and key_ ~= "lbb.no-route" and key_ ~= "lbb.gave-up" then
-    return nil, reason
-  end
-  -- would a bigger selection do? same belt ends, more ground around them
-  for grow = 1, 3 do
-    local big = {}
-    for k, v in pairs(world) do big[k] = v end
-    big.area = {x1 = a.x1 - grow, y1 = a.y1 - grow, x2 = a.x2 + grow, y2 = a.y2 + grow}
-    big.budget = {candidates = 20, successes = 1, work = 60000}
-    if w + 2 * grow <= 64 and h + 2 * grow <= 64 and plan_for(big, inputs, outputs) then
-      return nil, reason, {w + 2 * grow, h + 2 * grow, grow}
+-- world.blocked(x, y) / the `blocked` passed to a step: true = can't build,
+-- false = free, a number = can build after clearing (trees, rocks,
+-- cliffs), at that extra cost. Answers are cached in the search.
+local function lookups(S, blocked)
+  local occ, bc = S.world._occ, S.bc
+  local function free(x, y)
+    local kk = key(x, y)
+    if occ[kk] then return false end
+    local b = bc[kk]
+    if b == nil then
+      b = blocked and blocked(x, y) or false
+      bc[kk] = b
     end
+    return b ~= true
   end
-  return nil, reason
+  local function clear_at(kk)
+    local b = bc[kk]
+    return type(b) == "number" and b or 0
+  end
+  return free, clear_at
 end
 
-plan_for = function(world, inputs, outputs)
-  local a = world.area
+-- A search for the given belt ends; nil, reason if no design exists.
+local function search_new(world, inputs, outputs)
   local n, m = #inputs, #outputs
-
   -- candidate templates: hand-drawn ones, else a generated design
   local tpls = {}
   local want_lane = (n == 1 and m == 1)
   for _, t in ipairs(world.templates) do
-    if t.outputs == m and t.inputs >= n and (t.lane or false) == want_lane then
+    -- exact: only balanced with every input in use
+    if t.outputs == m and t.inputs >= n and (t.lane or false) == want_lane
+       and not (t.exact and t.inputs ~= n) then
       tpls[#tpls + 1] = t
     end
   end
@@ -899,222 +932,161 @@ plan_for = function(world, inputs, outputs)
   end
   if #tpls == 0 then return nil, {"lbb.no-template", n, m, generator.MAX} end
 
-  -- world.blocked(x, y): true = can't build, false = free, a number = can
-  -- build after clearing (trees, rocks, cliffs), at that extra cost
-  local blocked_cache = {}
-  local occ, fed, spans = world._occ, world._fed, world._spans
-  local function free(x, y)
-    local kk = key(x, y)
-    if occ[kk] then return false end
-    local b = blocked_cache[kk]
-    if b == nil then
-      b = world.blocked and world.blocked(x, y) or false
-      blocked_cache[kk] = b
-    end
-    return b ~= true
-  end
-  local function clear_at(kk)
-    local b = blocked_cache[kk]
-    return type(b) == "number" and b or 0
-  end
-
   -- majority input direction is the preferred flow direction
-  local dir_votes = {[0] = 0, 0, 0, 0}
+  local dir_votes = {[0] = 0, [1] = 0, [2] = 0, [3] = 0}
   for _, i in ipairs(inputs) do dir_votes[i.dir] = dir_votes[i.dir] + 1 end
-
-  local input_start, input_end = {}, {}
+  local input_start, input_end, output_tile = {}, {}, {}
   for _, i in ipairs(inputs) do
     input_start[key(i.sx, i.sy)] = i
     input_end[key(i.x, i.y)] = i
   end
-  local output_tile = {}
   for _, o in ipairs(outputs) do output_tile[key(o.x, o.y)] = o end
-
-  -- centroids of input starts / output belts, and of each variant's ports
   local icx, icy = centroid(inputs, "sx", "sy")
   local ocx, ocy = centroid(outputs, "x", "y")
-  for _, tpl in ipairs(tpls) do
-    for _, var in ipairs(variants_of(tpl)) do
-      if not var.in_cx then
-        local ip, op = {}, {}
-        for _, idx in ipairs(var.inputs) do local e = var.ents[idx]; ip[#ip + 1] = {x = e.x, y = e.y} end
-        for _, idx in ipairs(var.outputs) do
-          local e = var.ents[idx]
-          op[#op + 1] = {x = e.x + DX[e.dir], y = e.y + DY[e.dir]}
-        end
-        var.in_cx, var.in_cy = centroid(ip, "x", "y")
-        var.out_cx, var.out_cy = centroid(op, "x", "y")
-      end
-    end
-  end
-
-  local route_ug = (world.ug_max or 5) >= 2 and not world.no_route_ug
-  local cands = {}
-  for ti, tpl in ipairs(tpls) do
-    for _, var in ipairs(variants_of(tpl)) do
-      if var.ug_len <= (world.ug_max or 5) then
-        for ox = a.x1, a.x2 - var.w + 1 do
-          for oy = a.y1, a.y2 - var.h + 1 do
-            local ok = true
-            -- a port may sit on an existing input end / output start facing
-            -- the same way: that belt is the port, nothing is built there
-            local preset_in, preset_out, preset_at, preset_feed = {}, {}, {}, {}
-            for _, idx in ipairs(var.inputs) do
-              local e = var.ents[idx]
-              local kk = key(e.x + ox, e.y + oy)
-              local inp = input_end[kk]
-              if inp and inp.dir == var.flow then
-                preset_in[idx], preset_at[kk] = inp, true
-                preset_feed[key(inp.sx, inp.sy)] = true
-              end
-            end
-            for _, idx in ipairs(var.outputs) do
-              local e = var.ents[idx]
-              local kk = key(e.x + ox, e.y + oy)
-              local o = output_tile[kk]
-              if o and o.dir == var.flow then preset_out[idx], preset_at[kk] = o, true end
-            end
-            for _, t in ipairs(var.tiles) do
-              local x, y = t[1] + ox, t[2] + oy
-              local kk = key(x, y)
-              if not preset_at[kk] then
-                if not free(x, y) then ok = false; break end
-                if fed[kk] and not (preset_feed[kk] and #fed[kk] == 1) then
-                  -- only an input end may push straight into a template tile
-                  local idx = var.occ[key(t[1], t[2])]
-                  local e = var.ents[idx]
-                  if not (e.port == "in" and input_start[kk] and #fed[kk] == 1) then ok = false; break end
-                end
-              end
-            end
-            if ok then
-              for _, t in ipairs(var.keep) do
-                local x, y = t[1] + ox, t[2] + oy
-                if not in_area(a, x, y) or not free(x, y) then ok = false; break end
-              end
-            end
-            if ok then
-              for _, s in ipairs(var.spans) do
-                local sp = spans[key(s[1] + ox, s[2] + oy)]
-                local here = occ[key(s[1] + ox, s[2] + oy)]
-                if (sp and sp:find(tostring(s[3]), 1, true)) or
-                   (here and here.kind == "ug" and here.dir % 2 == s[3]) then ok = false; break end
-              end
-            end
-            if ok then
-              -- template undergrounds must not sit on the line of an existing pair
-              for _, s in ipairs(var.ugends) do
-                local sp = spans[key(s[1] + ox, s[2] + oy)]
-                if sp and sp:find(tostring(s[3]), 1, true) then ok = false; break end
-              end
-            end
-            if ok then
-              -- output port fronts must be buildable or be an output start
-              local oports = {}
-              for _, idx in ipairs(var.outputs) do
-                if not preset_out[idx] then
-                  local e = var.ents[idx]
-                  local fx, fy = e.x + ox + DX[e.dir], e.y + oy + DY[e.dir]
-                  local fk = key(fx, fy)
-                  local blocked_front = false
-                  if not (output_tile[fk] or (in_area(a, fx, fy) and free(fx, fy) and not fed[fk])) then
-                    -- something in front: only an underground from the port gets out
-                    if not route_ug then ok = false; break end
-                    blocked_front = true
-                  end
-                  oports[#oports + 1] = {fx = fx, fy = fy, idx = idx, blocked = blocked_front}
-                end
-              end
-              if ok then
-                local iports = {}
-                for _, idx in ipairs(var.inputs) do
-                  if not preset_in[idx] then
-                    local e = var.ents[idx]
-                    iports[#iports + 1] = {x = e.x + ox, y = e.y + oy, idx = idx}
-                  end
-                end
-                -- cheap estimate; exact pairing is done only for the best few
-                local pcx, pcy = var.in_cx + ox, var.in_cy + oy
-                local qcx, qcy = var.out_cx + ox, var.out_cy + oy
-                local clear = 0
-                for _, t in ipairs(var.tiles) do clear = clear + clear_at(key(t[1] + ox, t[2] + oy)) end
-                -- a design with spare inputs builds splitters nothing flows through
-                clear = clear + (#var.inputs - n) * UNUSED_PORT_COST
-                local h_cost = n * manhattan(icx, icy, pcx, pcy) + m * manhattan(qcx, qcy, ocx, ocy)
-                             + (#var.tiles) * 0.3 + (n - dir_votes[var.flow]) * 2 + clear
-                cands[#cands + 1] = {var = var, ox = ox, oy = oy, tpl = tpl, clear = clear,
-                                     iports = iports, oports = oports, h = h_cost,
-                                     preset_in = preset_in, preset_out = preset_out}
-              end
-            end
-          end
-        end
-      end
-    end
-  end
-  if #cands == 0 then
-    -- smallest design footprint (narrow side x long side)
-    local dw, dh
-    for _, tpl in ipairs(tpls) do
-      local v = variants_of(tpl)[1]
-      local s1, s2 = math.min(v.w, v.h), math.max(v.w, v.h)
-      if not dw or s1 * s2 < dw * dh then dw, dh = s1, s2 end
-    end
-    return nil, {"lbb.no-room", n, m, dw, dh}
-  end
-  table.sort(cands, function(p, q) return p.h < q.h end)
-
   local budget = world.budget or {}
-  local max_c = budget.candidates or 40
   world._work = {n = budget.work or 300000}
-  local max_s = budget.successes or 3
+  return {world = world, inputs = inputs, outputs = outputs, n = n, m = m, tpls = tpls,
+          bc = {}, phase = "scan", ti = 1, vi = 1, cands = {},
+          dir_votes = dir_votes, input_start = input_start, input_end = input_end,
+          output_tile = output_tile, icx = icx, icy = icy, ocx = ocx, ocy = ocy,
+          route_ug = (world.ug_max or 5) >= 2 and not world.no_route_ug,
+          max_c = budget.candidates or 40, max_s = budget.successes or 3}
+end
 
-  -- exact pairing + estimate for the most promising placements, then re-rank
+-- Port centroids of a variant (cached on the variant).
+local function port_centres(var)
+  if var.in_cx then return end
+  local ip, op = {}, {}
+  for _, idx in ipairs(var.inputs) do local e = var.ents[idx]; ip[#ip + 1] = {x = e.x, y = e.y} end
+  for _, idx in ipairs(var.outputs) do
+    local e = var.ents[idx]
+    op[#op + 1] = {x = e.x + DX[e.dir], y = e.y + DY[e.dir]}
+  end
+  var.in_cx, var.in_cy = centroid(ip, "x", "y")
+  var.out_cx, var.out_cy = centroid(op, "x", "y")
+end
+
+-- Can variant `var` sit at (ox, oy)? Adds a candidate if so.
+local function try_place(S, var, ox, oy, free, clear_at)
+  local world, a = S.world, S.world.area
+  local occ, fed, spans = world._occ, world._fed, world._spans
+  local input_start, input_end, output_tile = S.input_start, S.input_end, S.output_tile
+  -- a port may sit on an existing input end / output start facing the same
+  -- way: that belt is the port, nothing is built there
+  local preset_in, preset_out, preset_at, preset_feed = {}, {}, {}, {}
+  for _, idx in ipairs(var.inputs) do
+    local e = var.ents[idx]
+    local kk = key(e.x + ox, e.y + oy)
+    local inp = input_end[kk]
+    if inp and inp.dir == var.flow then
+      preset_in[idx], preset_at[kk] = inp, true
+      preset_feed[key(inp.sx, inp.sy)] = true
+    end
+  end
+  for _, idx in ipairs(var.outputs) do
+    local e = var.ents[idx]
+    local kk = key(e.x + ox, e.y + oy)
+    local o = output_tile[kk]
+    if o and o.dir == var.flow then preset_out[idx], preset_at[kk] = o, true end
+  end
+  for _, t in ipairs(var.tiles) do
+    local x, y = t[1] + ox, t[2] + oy
+    local kk = key(x, y)
+    if not preset_at[kk] then
+      if not free(x, y) then return end
+      if fed[kk] and not (preset_feed[kk] and #fed[kk] == 1) then
+        -- only an input end may push straight into a template tile
+        local e = var.ents[var.occ[key(t[1], t[2])]]
+        if not (e.port == "in" and input_start[kk] and #fed[kk] == 1) then return end
+      end
+    end
+  end
+  for _, t in ipairs(var.keep) do
+    local x, y = t[1] + ox, t[2] + oy
+    if not in_area(a, x, y) or not free(x, y) then return end
+  end
+  for _, s in ipairs(var.spans) do
+    local sp = spans[key(s[1] + ox, s[2] + oy)]
+    local here = occ[key(s[1] + ox, s[2] + oy)]
+    if (sp and sp:find(tostring(s[3]), 1, true)) or
+       (here and here.kind == "ug" and here.dir % 2 == s[3]) then return end
+  end
+  -- template undergrounds must not sit on the line of an existing pair
+  for _, s in ipairs(var.ugends) do
+    local sp = spans[key(s[1] + ox, s[2] + oy)]
+    if sp and sp:find(tostring(s[3]), 1, true) then return end
+  end
+  -- output port fronts must be buildable or be an output start
+  local oports = {}
+  for _, idx in ipairs(var.outputs) do
+    if not preset_out[idx] then
+      local e = var.ents[idx]
+      local fx, fy = e.x + ox + DX[e.dir], e.y + oy + DY[e.dir]
+      local fk = key(fx, fy)
+      local blocked_front = false
+      if not (output_tile[fk] or (in_area(a, fx, fy) and free(fx, fy) and not fed[fk])) then
+        -- something in front: only an underground from the port gets out
+        if not S.route_ug then return end
+        blocked_front = true
+      end
+      oports[#oports + 1] = {fx = fx, fy = fy, idx = idx, blocked = blocked_front}
+    end
+  end
+  local iports = {}
+  for _, idx in ipairs(var.inputs) do
+    if not preset_in[idx] then
+      local e = var.ents[idx]
+      iports[#iports + 1] = {x = e.x + ox, y = e.y + oy, idx = idx}
+    end
+  end
+  -- cheap estimate; exact pairing is done only for the best few
+  local pcx, pcy = var.in_cx + ox, var.in_cy + oy
+  local qcx, qcy = var.out_cx + ox, var.out_cy + oy
+  local clear = 0
+  for _, t in ipairs(var.tiles) do clear = clear + clear_at(key(t[1] + ox, t[2] + oy)) end
+  -- a design with spare inputs builds splitters nothing flows through
+  clear = clear + (#var.inputs - S.n) * UNUSED_PORT_COST
+  local h_cost = S.n * manhattan(S.icx, S.icy, pcx, pcy) + S.m * manhattan(qcx, qcy, S.ocx, S.ocy)
+               + (#var.tiles) * 0.3 + (S.n - S.dir_votes[var.flow]) * 2 + clear
+  S.cands[#S.cands + 1] = {var = var, ox = ox, oy = oy, tpl = S.tpl_now, clear = clear,
+                           iports = iports, oports = oports, h = h_cost,
+                           preset_in = preset_in, preset_out = preset_out}
+end
+
+-- Placement scan done: rank the candidates (exact pairing for the best few).
+local function rank(S)
+  local cands = S.cands
+  local n = S.n
+  table.sort(cands, function(p, q) return p.h < q.h end)
   local top = {}
-  for i = 1, math.min(#cands, max_c * 3) do
+  for i = 1, math.min(#cands, S.max_c * 3) do
     local c = cands[i]
     -- belt ends serving as ports are already connected
     local used = {}
     for _, v in pairs(c.preset_in) do used[v] = true end
     for _, v in pairs(c.preset_out) do used[v] = true end
     local rin, rout = {}, {}
-    for _, v in ipairs(inputs) do if not used[v] then rin[#rin + 1] = v end end
-    for _, v in ipairs(outputs) do if not used[v] then rout[#rout + 1] = v end end
+    for _, v in ipairs(S.inputs) do if not used[v] then rin[#rin + 1] = v end end
+    for _, v in ipairs(S.outputs) do if not used[v] then rout[#rout + 1] = v end end
     local ip, icost, op, ocost = {}, 0, {}, 0
     if #rin > 0 then ip, icost = assign_inputs(rin, c.iports, c.var.flow) end
     if #rout > 0 then op, ocost = assign_outputs(rout, c.oports, c.var.flow) end
     c.in_pairs, c.out_pairs = ip, op
-    c.h = icost + ocost + (#c.var.tiles) * 0.3 + (n - dir_votes[c.var.flow]) * 2 + c.clear
+    c.h = icost + ocost + (#c.var.tiles) * 0.3 + (n - S.dir_votes[c.var.flow]) * 2 + c.clear
     top[#top + 1] = c
   end
   table.sort(top, function(p, q) return p.h < q.h end)
-  cands = top
-  local best, best_cost, best_cand
-  local successes = 0
-  for i = 1, math.min(#cands, max_c) do
-    local cand = cands[i]
-    if best_cost and cand.h > best_cost + 8 then break end
-    if world._work.n <= 0 then break end
-    -- plain belts first; undergrounds only when belts can't make it
-    local ents, cost = try_candidate(world, cand, free, clear_at, false)
-    local plain = ents ~= nil
-    if not ents and (world.ug_max or 5) >= 2 and not world.no_route_ug and world._work.n > 0 then
-      ents, cost = try_candidate(world, cand, free, clear_at, true)
-    end
-    if ents then
-      cost = cost + (#cand.var.tiles) * 0.3 + cand.clear
-      if not best_cost or cost < best_cost then best, best_cost, best_cand = ents, cost, cand end
-      -- a placement that needed undergrounds is a fallback: keep looking
-      if plain then
-        successes = successes + 1
-        if successes >= max_s then break end
-      end
-    end
-  end
+  S.cands, S.ci, S.successes = top, 1, 0
+end
+
+local function finish(S)
+  local best = S.best
   if not best then
-    if world._work.n <= 0 then return nil, {"lbb.gave-up", n, m} end
-    return nil, {"lbb.no-route", n, m}
+    if S.world._work.n <= 0 then S.reason = {"lbb.gave-up", S.n, S.m}
+    else S.reason = {"lbb.no-route", S.n, S.m} end
+    return true
   end
+  local _, clear_at = lookups(S, nil)
   -- tiles that must be cleared (trees, rocks, cliffs) before building
   local clear, seen = {}, {}
   for _, e in ipairs(best) do
@@ -1126,8 +1098,167 @@ plan_for = function(world, inputs, outputs)
       end
     end
   end
-  return {template = best_cand.tpl, entities = best, n_in = n, n_out = m, cost = best_cost,
-          flow = best_cand.var.flow, inputs = inputs, outputs = outputs, clear = clear}
+  local cand = S.best_cand
+  S.plan = {template = cand.tpl, entities = best, n_in = S.n, n_out = S.m, cost = S.best_cost,
+            flow = cand.var.flow, inputs = S.inputs, outputs = S.outputs, clear = clear}
+  return true
+end
+
+-- One slice of a search, about `tick` units of work. Returns true when
+-- finished (S.plan or S.reason is set).
+local function search_step(S, tick, blocked)
+  local free, clear_at = lookups(S, blocked)
+  local world, a = S.world, S.world.area
+  local done = 0
+  if S.phase == "scan" then
+    while S.ti <= #S.tpls do
+      local tpl = S.tpls[S.ti]
+      local var = variants_of(tpl)[S.vi]
+      if not var then
+        S.ti, S.vi, S.ox = S.ti + 1, 1, nil
+      elseif var.ug_len > (world.ug_max or 5) then
+        S.vi, S.ox = S.vi + 1, nil
+      else
+        port_centres(var)
+        S.ox = S.ox or a.x1
+        if S.ox > a.x2 - var.w + 1 then
+          S.vi, S.ox = S.vi + 1, nil
+        else
+          S.tpl_now = tpl
+          for oy = a.y1, a.y2 - var.h + 1 do
+            try_place(S, var, S.ox, oy, free, clear_at)
+            done = done + #var.tiles / 4
+          end
+          S.ox = S.ox + 1
+        end
+      end
+      if done >= tick then return false end
+    end
+    if #S.cands == 0 then
+      -- smallest design footprint (narrow side x long side)
+      local dw, dh
+      for _, tpl in ipairs(S.tpls) do
+        local v = variants_of(tpl)[1]
+        local s1, s2 = math.min(v.w, v.h), math.max(v.w, v.h)
+        if not dw or s1 * s2 < dw * dh then dw, dh = s1, s2 end
+      end
+      S.reason = {"lbb.no-room", S.n, S.m, dw, dh}
+      return true
+    end
+    rank(S)
+    S.phase = "try"
+    if done >= tick then return false end
+  end
+
+  -- try the most promising placements: plain belts first, undergrounds
+  -- only when belts can't make it
+  local start = world._work.n
+  while true do
+    if not S.run then
+      local cand = S.cands[S.ci]
+      if not cand or S.ci > S.max_c or world._work.n <= 0
+         or (S.best_cost and cand.h > S.best_cost + 8) then
+        return finish(S)
+      end
+      S.run, S.run_ug = cand_init(world, cand, false), false
+      if not S.run and S.route_ug then S.run, S.run_ug = cand_init(world, cand, true), true end
+      if not S.run then S.ci = S.ci + 1 end
+    else
+      local remaining = tick - done - (start - world._work.n)
+      local ok, ents, cost = cand_step(world, S.run, free, clear_at, math.max(remaining, 1))
+      if ok == nil then return false end
+      local cand = S.run.cand
+      if ok then
+        cost = cost + (#cand.var.tiles) * 0.3 + cand.clear
+        if not S.best_cost or cost < S.best_cost then
+          S.best, S.best_cost, S.best_cand = ents, cost, cand
+        end
+        S.run, S.ci = nil, S.ci + 1
+        -- a placement that needed undergrounds is a fallback: keep looking
+        if not S.run_ug then
+          S.successes = S.successes + 1
+          if S.successes >= S.max_s then return finish(S) end
+        end
+      elseif not S.run_ug and S.route_ug and world._work.n > 0 then
+        S.run, S.run_ug = cand_init(world, cand, true), true
+        if not S.run then S.ci = S.ci + 1 end
+      else
+        S.run, S.ci = nil, S.ci + 1
+      end
+    end
+    if done + (start - world._work.n) >= tick then return false end
+  end
+end
+
+------------------------------------------------------------------- plan
+
+-- Starts planning. Returns a state for planner.step, or nil, reason when
+-- the selection can't work at all.
+function planner.start(world)
+  index_world(world)
+  local a = world.area
+  local w, h = a.x2 - a.x1 + 1, a.y2 - a.y1 + 1
+  if w > 64 or h > 64 then return nil, {"lbb.too-big", 64} end
+
+  local inputs, outputs = planner.detect(world)
+  local n, m = #inputs, #outputs
+  if n == 0 or m == 0 then return nil, {"lbb.no-ends", n, m} end
+  for _, inp in ipairs(inputs) do
+    if not in_area(a, inp.sx, inp.sy) then return nil, {"lbb.input-leaves", inp.x, inp.y} end
+  end
+  local S, reason = search_new(world, inputs, outputs)
+  if not S then return nil, reason end
+  return {world = world, inputs = inputs, outputs = outputs, main = S, grow = 0}
+end
+
+local HINT_REASONS = {["lbb.no-room"] = true, ["lbb.no-route"] = true, ["lbb.gave-up"] = true}
+
+-- Does about `tick` units of work (one unit ~ one route search node).
+-- blocked: the world lookup (see lookups), passed on every call.
+-- Returns nil while not done, else the plan, or false, reason, hint.
+-- hint = {w, h, grow}: the same belt ends could be connected in a
+-- selection grown by `grow` tiles on each side (w x h tiles).
+function planner.step(P, tick, blocked)
+  if P.main then
+    if not search_step(P.main, tick, blocked) then return nil end
+    local S = P.main
+    P.main = nil
+    if S.plan then return S.plan end
+    P.reason = S.reason
+    if P.world.no_hint or not HINT_REASONS[S.reason[1]] then return false, S.reason end
+  end
+  -- would a bigger selection do? same belt ends, more ground around them
+  local a = P.world.area
+  local w, h = a.x2 - a.x1 + 1, a.y2 - a.y1 + 1
+  while true do
+    if not P.sub then
+      P.grow = P.grow + 1
+      local g = P.grow
+      if g > 3 or w + 2 * g > 64 or h + 2 * g > 64 then return false, P.reason end
+      local big = {}
+      for k, v in pairs(P.world) do big[k] = v end
+      big.area = {x1 = a.x1 - g, y1 = a.y1 - g, x2 = a.x2 + g, y2 = a.y2 + g}
+      big.budget = {candidates = 20, successes = 1, work = 60000}
+      P.sub = search_new(big, P.inputs, P.outputs)
+      if not P.sub then return false, P.reason end
+    end
+    if not search_step(P.sub, tick, blocked) then return nil end
+    local ok = P.sub.plan ~= nil
+    P.sub = nil
+    if ok then return false, P.reason, {w + 2 * P.grow, h + 2 * P.grow, P.grow} end
+  end
+end
+
+-- Plans in one go (tests, and anything that doesn't mind the wait).
+-- Returns plan, or nil, reason, hint.
+function planner.plan(world)
+  local P, reason = planner.start(world)
+  if not P then return nil, reason end
+  while true do
+    local res, why, hint = planner.step(P, math.huge, world.blocked)
+    if res then return res end
+    if res == false then return nil, why, hint end
+  end
 end
 
 return planner
