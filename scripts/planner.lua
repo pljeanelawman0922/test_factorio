@@ -57,8 +57,11 @@ local function parse_template(tpl)
   local ents, inputs, outputs = {}, {}, {}
   local h = #tpl.grid
   local w = 0
+  local rows = {}
+  for y, row in ipairs(tpl.grid) do rows[y] = split_cells(row) end
+  local function at(x, y) return rows[y] and rows[y][x] end
   for y, row in ipairs(tpl.grid) do
-    local cells = split_cells(row)
+    local cells = rows[y]
     if #cells > w then w = #cells end
     local x = 1
     while x <= #cells do
@@ -72,7 +75,15 @@ local function parse_template(tpl)
         assert(cells[x + 1] == "s", tpl.name .. ": S without s")
         ents[#ents + 1] = {kind = "splitter", x = lx, y = ly, x2 = lx + 1, y2 = ly, dir = 0}
         x = x + 1
-      elseif c ~= "." then
+      elseif c == "K" then
+        -- facing east: K = left (north) half, k right below it
+        assert(at(x, y + 1) == "k", tpl.name .. ": K without k below")
+        ents[#ents + 1] = {kind = "splitter", x = lx, y = ly, x2 = lx, y2 = ly + 1, dir = 1}
+      elseif c == "J" then
+        -- facing west: J = left (south) half, j right above it
+        assert(at(x, y - 1) == "j", tpl.name .. ": J without j above")
+        ents[#ents + 1] = {kind = "splitter", x = lx, y = ly, x2 = lx, y2 = ly - 1, dir = 3}
+      elseif c ~= "." and c ~= "k" and c ~= "j" then
         error(tpl.name .. ": unknown template symbol " .. c)
       end
       x = x + 1
@@ -630,6 +641,7 @@ local function try_candidate(world, cand, free, clear_at, use_ug)
   -- unused input ports are not built; their tiles become ordinary ground
   local used_port = {}
   for _, pr in ipairs(cand.in_pairs) do used_port[pr[2].idx] = true end
+  for idx in pairs(cand.preset_in or {}) do used_port[idx] = true end
   for _, idx in ipairs(var.inputs) do
     if not used_port[idx] then
       local e = var.ents[idx]
@@ -785,6 +797,8 @@ local function try_candidate(world, cand, free, clear_at, use_ug)
     if nconf == 0 then
       -- template ports replaced by a route's underground are not built
       local dropped = {}
+      for idx in pairs(cand.preset_in or {}) do dropped[idx] = true end
+      for idx in pairs(cand.preset_out or {}) do dropped[idx] = true end
       for i = 1, n do
         local path, job = paths[i], jobs[i]
         local first, last = path[1], path[#path]
@@ -826,6 +840,11 @@ local function try_candidate(world, cand, free, clear_at, use_ug)
   return nil
 end
 
+local plan_for
+
+-- Returns plan, or nil, reason, hint. hint = {w, h, grow} when the same belt
+-- ends could be connected in a selection grown by `grow` tiles on each side
+-- (w x h tiles); only tried when the design doesn't fit or can't be routed.
 function planner.plan(world)
   index_world(world)
   local a = world.area
@@ -839,6 +858,29 @@ function planner.plan(world)
   for _, inp in ipairs(inputs) do
     if not in_area(a, inp.sx, inp.sy) then return nil, {"lbb.input-leaves", inp.x, inp.y} end
   end
+
+  local plan, reason = plan_for(world, inputs, outputs)
+  if plan or world.no_hint then return plan, reason end
+  local key_ = reason[1]
+  if key_ ~= "lbb.no-room" and key_ ~= "lbb.no-route" and key_ ~= "lbb.gave-up" then
+    return nil, reason
+  end
+  -- would a bigger selection do? same belt ends, more ground around them
+  for grow = 1, 3 do
+    local big = {}
+    for k, v in pairs(world) do big[k] = v end
+    big.area = {x1 = a.x1 - grow, y1 = a.y1 - grow, x2 = a.x2 + grow, y2 = a.y2 + grow}
+    big.budget = {candidates = 20, successes = 1, work = 60000}
+    if w + 2 * grow <= 64 and h + 2 * grow <= 64 and plan_for(big, inputs, outputs) then
+      return nil, reason, {w + 2 * grow, h + 2 * grow, grow}
+    end
+  end
+  return nil, reason
+end
+
+plan_for = function(world, inputs, outputs)
+  local a = world.area
+  local n, m = #inputs, #outputs
 
   -- candidate templates: hand-drawn ones, else a generated design
   local tpls = {}
@@ -876,8 +918,11 @@ function planner.plan(world)
   local dir_votes = {[0] = 0, 0, 0, 0}
   for _, i in ipairs(inputs) do dir_votes[i.dir] = dir_votes[i.dir] + 1 end
 
-  local input_start = {}
-  for _, i in ipairs(inputs) do input_start[key(i.sx, i.sy)] = i end
+  local input_start, input_end = {}, {}
+  for _, i in ipairs(inputs) do
+    input_start[key(i.sx, i.sy)] = i
+    input_end[key(i.x, i.y)] = i
+  end
   local output_tile = {}
   for _, o in ipairs(outputs) do output_tile[key(o.x, o.y)] = o end
 
@@ -906,15 +951,35 @@ function planner.plan(world)
         for ox = a.x1, a.x2 - var.w + 1 do
           for oy = a.y1, a.y2 - var.h + 1 do
             local ok = true
+            -- a port may sit on an existing input end / output start facing
+            -- the same way: that belt is the port, nothing is built there
+            local preset_in, preset_out, preset_at, preset_feed = {}, {}, {}, {}
+            for _, idx in ipairs(var.inputs) do
+              local e = var.ents[idx]
+              local kk = key(e.x + ox, e.y + oy)
+              local inp = input_end[kk]
+              if inp and inp.dir == var.flow then
+                preset_in[idx], preset_at[kk] = inp, true
+                preset_feed[key(inp.sx, inp.sy)] = true
+              end
+            end
+            for _, idx in ipairs(var.outputs) do
+              local e = var.ents[idx]
+              local kk = key(e.x + ox, e.y + oy)
+              local o = output_tile[kk]
+              if o and o.dir == var.flow then preset_out[idx], preset_at[kk] = o, true end
+            end
             for _, t in ipairs(var.tiles) do
               local x, y = t[1] + ox, t[2] + oy
-              if not free(x, y) then ok = false; break end
               local kk = key(x, y)
-              if fed[kk] then
-                -- only an input end may push straight into a template tile
-                local idx = var.occ[key(t[1], t[2])]
-                local e = var.ents[idx]
-                if not (e.port == "in" and input_start[kk] and #fed[kk] == 1) then ok = false; break end
+              if not preset_at[kk] then
+                if not free(x, y) then ok = false; break end
+                if fed[kk] and not (preset_feed[kk] and #fed[kk] == 1) then
+                  -- only an input end may push straight into a template tile
+                  local idx = var.occ[key(t[1], t[2])]
+                  local e = var.ents[idx]
+                  if not (e.port == "in" and input_start[kk] and #fed[kk] == 1) then ok = false; break end
+                end
               end
             end
             if ok then
@@ -942,19 +1007,23 @@ function planner.plan(world)
               -- output port fronts must be buildable or be an output start
               local oports = {}
               for _, idx in ipairs(var.outputs) do
-                local e = var.ents[idx]
-                local fx, fy = e.x + ox + DX[e.dir], e.y + oy + DY[e.dir]
-                local fk = key(fx, fy)
-                if not (output_tile[fk] or (in_area(a, fx, fy) and free(fx, fy) and not fed[fk])) then
-                  ok = false; break
+                if not preset_out[idx] then
+                  local e = var.ents[idx]
+                  local fx, fy = e.x + ox + DX[e.dir], e.y + oy + DY[e.dir]
+                  local fk = key(fx, fy)
+                  if not (output_tile[fk] or (in_area(a, fx, fy) and free(fx, fy) and not fed[fk])) then
+                    ok = false; break
+                  end
+                  oports[#oports + 1] = {fx = fx, fy = fy, idx = idx}
                 end
-                oports[#oports + 1] = {fx = fx, fy = fy, idx = idx}
               end
               if ok then
                 local iports = {}
                 for _, idx in ipairs(var.inputs) do
-                  local e = var.ents[idx]
-                  iports[#iports + 1] = {x = e.x + ox, y = e.y + oy, idx = idx}
+                  if not preset_in[idx] then
+                    local e = var.ents[idx]
+                    iports[#iports + 1] = {x = e.x + ox, y = e.y + oy, idx = idx}
+                  end
                 end
                 -- cheap estimate; exact pairing is done only for the best few
                 local pcx, pcy = var.in_cx + ox, var.in_cy + oy
@@ -964,7 +1033,8 @@ function planner.plan(world)
                 local h_cost = n * manhattan(icx, icy, pcx, pcy) + m * manhattan(qcx, qcy, ocx, ocy)
                              + (#var.tiles) * 0.3 + (n - dir_votes[var.flow]) * 2 + clear
                 cands[#cands + 1] = {var = var, ox = ox, oy = oy, tpl = tpl, clear = clear,
-                                     iports = iports, oports = oports, h = h_cost}
+                                     iports = iports, oports = oports, h = h_cost,
+                                     preset_in = preset_in, preset_out = preset_out}
               end
             end
           end
@@ -972,7 +1042,16 @@ function planner.plan(world)
       end
     end
   end
-  if #cands == 0 then return nil, {"lbb.no-room", n, m} end
+  if #cands == 0 then
+    -- smallest design footprint (narrow side x long side)
+    local dw, dh
+    for _, tpl in ipairs(tpls) do
+      local v = variants_of(tpl)[1]
+      local s1, s2 = math.min(v.w, v.h), math.max(v.w, v.h)
+      if not dw or s1 * s2 < dw * dh then dw, dh = s1, s2 end
+    end
+    return nil, {"lbb.no-room", n, m, dw, dh}
+  end
   table.sort(cands, function(p, q) return p.h < q.h end)
 
   local budget = world.budget or {}
@@ -984,8 +1063,16 @@ function planner.plan(world)
   local top = {}
   for i = 1, math.min(#cands, max_c * 3) do
     local c = cands[i]
-    local ip, icost = assign_inputs(inputs, c.iports, c.var.flow)
-    local op, ocost = assign_outputs(outputs, c.oports, c.var.flow)
+    -- belt ends serving as ports are already connected
+    local used = {}
+    for _, v in pairs(c.preset_in) do used[v] = true end
+    for _, v in pairs(c.preset_out) do used[v] = true end
+    local rin, rout = {}, {}
+    for _, v in ipairs(inputs) do if not used[v] then rin[#rin + 1] = v end end
+    for _, v in ipairs(outputs) do if not used[v] then rout[#rout + 1] = v end end
+    local ip, icost, op, ocost = {}, 0, {}, 0
+    if #rin > 0 then ip, icost = assign_inputs(rin, c.iports, c.var.flow) end
+    if #rout > 0 then op, ocost = assign_outputs(rout, c.oports, c.var.flow) end
     c.in_pairs, c.out_pairs = ip, op
     c.h = icost + ocost + (#c.var.tiles) * 0.3 + (n - dir_votes[c.var.flow]) * 2 + c.clear
     top[#top + 1] = c

@@ -276,7 +276,41 @@ def fixed():
             '. . > . . . . > . .',
             '. . . . . . . . . .']
     ok &= check_detect('inside: screenshot', shot, (0, 0, 9, 4), [(2, 3)], [(7, 1), (7, 2), (7, 3)])
-    ok &= run('inside: screenshot + 1 row', ['. ' * 9 + '.'] + shot + ['. ' * 9 + '.'], (0, 0, 9, 5))
+    # the 1 -> 3 from the bug report uses the belts themselves as its ports
+    ok &= run('inside: screenshot', shot, (0, 0, 9, 4), expect=uses_ports(1, 3))
+    # third screenshot: the same, tight (the user's blueprint fits exactly)
+    g = blank(7, 6)
+    for y in (2, 3, 4):
+        g[y][6] = '>'
+    g[4][1] = '>'
+    ok &= run('inside: screenshot 3', rows_of(g), (0, 0, 6, 5), expect=uses_ports(1, 3))
+    # too small: the refusal names the design size and a selection that works
+    g = blank(6, 4)
+    for y in (0, 1, 2):
+        g[y][5] = '>'
+    g[3][0] = '>'
+    ents, lents, rocks = parse_world(rows_of(g))
+    r = planner.plan(make_world(lua_list(lents), lua_list(rocks), 0, 0, 5, 3, 5))
+    reason = list(r[1].values()) if r[0] is None else None
+    hint = list(r[2].values()) if r[0] is None and len(r) > 2 and r[2] else None
+    good = reason == ['lbb.no-room', 1, 3, 4, 6] and hint == [8, 6, 1]
+    print(('PASS' if good else 'FAIL') + f' too small 1->3: {reason} hint {hint}')
+    ok &= good
+    # second screenshot: 1 belt at the left edge, 3 outputs spread down the right edge
+    g = blank(16, 9)
+    for y in (0, 4, 8):
+        g[y][15] = '>'
+    g[5][0] = '>'
+    ok &= check_detect('inside: screenshot 2', rows_of(g), (0, 0, 15, 8), [(0, 5)], [(15, 0), (15, 4), (15, 8)])
+    ok &= run('inside: screenshot 2', rows_of(g), (0, 0, 15, 8), expect=uses('1x3'))
+    # no-room names the design size
+    rows, area = scenario_straight(6, 6, gap=10, w=14)
+    ents, lents, rocks = parse_world(rows)
+    r = planner.plan(make_world(lua_list(lents), lua_list(rocks), *area, 5))
+    reason = list(r[1].values())
+    good = reason == ['lbb.no-room', 6, 6, 11, 20]
+    print(('PASS' if good else 'FAIL') + f' no-room names the design size: {reason}')
+    ok &= good
     # longer pieces, inputs and outputs both inside, turning flow
     g = blank(14, 16)
     for x in (3, 4, 5):
@@ -328,6 +362,16 @@ def check_detect(name, rows, area, want_in, want_out):
     good = got_in == sorted(want_in) and got_out == sorted(want_out)
     print(('PASS' if good else 'FAIL') + f' {name}: inputs {got_in} outputs {got_out}')
     return good
+
+
+def uses_ports(n, m):
+    """the template's ports are the existing belt ends: no port belts built"""
+    def f(plan, ents):
+        if plan.template.name != '1x3':
+            return f'expected template 1x3, got {plan.template.name}'
+        routed = [e for e in ents if e.route]
+        return f'{len(routed)} route belts, expected none' if routed else None
+    return f
 
 
 def uses(name):

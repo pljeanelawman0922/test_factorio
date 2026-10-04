@@ -75,6 +75,20 @@ def parse_grid(grid):
                 ents[t] = {'kind': 'splitter', 'dir': 0, 'half': 'L', 'id': sid}
                 ents[(x + 1, y)] = {'kind': 'splitter', 'dir': 0, 'half': 'R', 'id': sid}
                 x += 1
+            elif c == 'K':
+                if y + 1 >= h or len(rows[y + 1]) <= x or rows[y + 1][x] != 'k':
+                    raise SimError(f'K without k below at {t}')
+                sid += 1
+                ents[t] = {'kind': 'splitter', 'dir': 1, 'half': 'L', 'id': sid}
+                ents[(x, y + 1)] = {'kind': 'splitter', 'dir': 1, 'half': 'R', 'id': sid}
+            elif c == 'J':
+                if y == 0 or len(rows[y - 1]) <= x or rows[y - 1][x] != 'j':
+                    raise SimError(f'J without j above at {t}')
+                sid += 1
+                ents[t] = {'kind': 'splitter', 'dir': 3, 'half': 'L', 'id': sid}
+                ents[(x, y - 1)] = {'kind': 'splitter', 'dir': 3, 'half': 'R', 'id': sid}
+            elif c in 'kj':
+                pass  # second half, placed with K / J
             elif c == 's':
                 raise SimError(f'stray s at {t}')
             elif c != '.':

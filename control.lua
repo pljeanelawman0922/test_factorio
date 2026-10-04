@@ -258,8 +258,9 @@ local function on_select(event)
   world._occ = nil -- planner.plan re-indexes
   world.blocked = make_blocked(surface, force, tier.belt)
 
-  local plan, reason = planner.plan(world)
+  local plan, reason, hint = planner.plan(world)
   if not plan then
+    if hint then reason = {"", reason, " ", {"lbb.try-size", hint[1], hint[2], hint[3]}} end
     tell(player, reason, false)
     return
   end

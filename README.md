@@ -31,6 +31,15 @@ piece (in its direction) than behind it, it is an input, otherwise an
 output. Example: one belt on the left and three on the right, all facing
 east, is 1 input → 3 outputs.
 
+A design's input or output belt may be your own belt end when it already
+sits in the right place and faces the right way; then nothing is built
+there. Example: one belt, then 4 free tiles, then three belts stacked
+beside each other, all facing the same way, takes exactly the 1 → 3 design.
+
+If the design doesn't fit, the message gives the size of the design itself
+and, when one works, a selection size for the same belts (the planner tries
+1 to 3 more tiles on each side).
+
 Belt tier: the new belts, splitters and undergrounds match the fastest (or,
 per player setting, the slowest) of the selected belts. Modded tiers are found
 by belt speed.
@@ -46,7 +55,7 @@ in the selection.
 | 2 → 1, 3 → 1, 4 → 1 | merger |
 | 1 → 2, 2 → 2 | 2 → 2 |
 | 3 → 2, 4 → 2 | 4 → 2 |
-| 1 → 3 | 1 → 3 splitter with a loop-back (5 × 7) |
+| 1 → 3 | 1 → 3 splitter with a loop-back (4 × 6) |
 | 1 → 3, 2 → 3, 3 → 3 | 3 → 3 (4 → 4 with a loop-back) |
 | 1 → 4, 2 → 4 | 2 → 4 |
 | 3 → 4, 4 → 4 | 4 → 4 |
@@ -144,6 +153,7 @@ outputs on the first:
 
 ```
 ^ > v <   belts        S s   splitter (left, right half)
+                       K/k   splitter facing east (K on top)  J/j   facing west (J below)
 D / U     underground entrance / exit facing north
 e / E     underground entrance / exit facing east (w / W: west)
 .         empty
