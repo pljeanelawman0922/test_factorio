@@ -819,10 +819,10 @@ local function cand_step(world, R, free, clear_at, tick)
       -- give up on this candidate when overlaps stop shrinking
       if not R.best_conf or nconf < R.best_conf then R.best_conf, R.stall = nconf, 0
       else R.stall = R.stall + 1 end
-      if R.stall >= 4 then return false end
+      if R.stall >= (world.route_stall or 3) then return false end
       R.present = R.present * 1.8
       R.iter, R.oi = R.iter + 1, 1
-      if R.iter > (world.route_iterations or 12) then return false end
+      if R.iter > (world.route_iterations or 8) then return false end
     else
       local ji = R.order[R.oi]
       if not R.astar then
@@ -915,15 +915,19 @@ local function lookups(S, blocked)
 end
 
 -- A search for the given belt ends; nil, reason if no design exists.
--- tier 1: only the designs with the fewest inputs that still take all the
--- belts (no spare splitters); tier 2: the other matching designs; nil: all.
+-- Designs that can serve n -> m with this belt tier.
+-- tier 1: only the ones with the fewest inputs that still take all the
+-- belts (no spare splitters); tier 2: the other ones; tier 3: a generated
+-- design; nil: tiers 1 and 2.
 local function matching(world, n, m)
   local list, fewest = {}, nil
   local want_lane = (n == 1 and m == 1)
+  local ug_max = world.ug_max or 5
   for _, t in ipairs(world.templates) do
-    -- exact: only balanced with every input in use
+    -- exact: only balanced with every input in use; undergrounds must be
+    -- within the tier's reach
     if t.outputs == m and t.inputs >= n and (t.lane or false) == want_lane
-       and not (t.exact and t.inputs ~= n) then
+       and not (t.exact and t.inputs ~= n) and variants_of(t)[1].ug_len <= ug_max then
       list[#list + 1] = t
       if not fewest or t.inputs < fewest then fewest = t.inputs end
     end
@@ -934,17 +938,17 @@ end
 local function search_new(world, inputs, outputs, tier)
   local n, m = #inputs, #outputs
   -- candidate templates: hand-drawn / imported ones, else a generated design
-  local all, fewest = matching(world, n, m)
   local tpls = {}
-  for _, t in ipairs(all) do
-    if not tier or (tier == 1) == (t.inputs == fewest) then tpls[#tpls + 1] = t end
-  end
-  if tier == 2 and #tpls == 0 then return nil end
-  local want_lane = (n == 1 and m == 1)
-  if #tpls == 0 and not want_lane then
+  if tier == 3 then
+    if n == 1 and m == 1 then return nil end
     tpls[1] = generator.template(n, m, world.ug_max or 5)
+  else
+    local all, fewest = matching(world, n, m)
+    for _, t in ipairs(all) do
+      if not tier or (tier == 1) == (t.inputs == fewest) then tpls[#tpls + 1] = t end
+    end
   end
-  if #tpls == 0 then return nil, {"lbb.no-template", n, m, generator.MAX} end
+  if #tpls == 0 then return nil end
 
   -- majority input direction is the preferred flow direction
   local dir_votes = {[0] = 0, [1] = 0, [2] = 0, [3] = 0}
@@ -958,13 +962,13 @@ local function search_new(world, inputs, outputs, tier)
   local icx, icy = centroid(inputs, "sx", "sy")
   local ocx, ocy = centroid(outputs, "x", "y")
   local budget = world.budget or {}
-  world._work = {n = budget.work or 300000}
+  world._work = {n = budget.work or 600000}
   return {world = world, inputs = inputs, outputs = outputs, n = n, m = m, tpls = tpls,
           bc = {}, phase = "scan", ti = 1, vi = 1, cands = {},
           dir_votes = dir_votes, input_start = input_start, input_end = input_end,
           output_tile = output_tile, icx = icx, icy = icy, ocx = ocx, ocy = ocy,
           route_ug = (world.ug_max or 5) >= 2 and not world.no_route_ug,
-          max_c = budget.candidates or 40, max_s = budget.successes or 3}
+          max_c = budget.candidates or 100, max_s = budget.successes or 3}
 end
 
 -- Port centroids of a variant (cached on the variant).
@@ -1220,9 +1224,14 @@ function planner.start(world)
   for _, inp in ipairs(inputs) do
     if not in_area(a, inp.sx, inp.sy) then return nil, {"lbb.input-leaves", inp.x, inp.y} end
   end
-  local S, reason = search_new(world, inputs, outputs, 1)
-  if not S then return nil, reason end
-  return {world = world, inputs = inputs, outputs = outputs, main = S, tier = 1, grow = 0}
+  -- the first tier that has any design
+  for tier = 1, 3 do
+    local S = search_new(world, inputs, outputs, tier)
+    if S then
+      return {world = world, inputs = inputs, outputs = outputs, main = S, tier = tier, grow = 0}
+    end
+  end
+  return nil, {"lbb.no-template", n, m, generator.MAX}
 end
 
 local HINT_REASONS = {["lbb.no-room"] = true, ["lbb.no-route"] = true, ["lbb.gave-up"] = true}
@@ -1240,12 +1249,12 @@ function planner.step(P, tick, blocked)
     if S.plan then return S.plan end
     P.reason = P.reason or S.reason   -- the first tier's reason: its designs are the smallest
     if not HINT_REASONS[S.reason[1]] then return false, S.reason end
-    if P.tier == 1 then
-      -- the designs with spare inputs might still fit
-      P.tier = 2
-      P.main = search_new(P.world, P.inputs, P.outputs, 2)
-      if P.main then return nil end
+    -- next tier: designs with spare inputs, then a generated design
+    while P.tier < 3 and not P.main do
+      P.tier = P.tier + 1
+      P.main = search_new(P.world, P.inputs, P.outputs, P.tier)
     end
+    if P.main then return nil end
   end
   if P.world.no_hint then return false, P.reason end
   -- would a bigger selection do? same belt ends, more ground around them
@@ -1260,7 +1269,7 @@ function planner.step(P, tick, blocked)
       for k, v in pairs(P.world) do big[k] = v end
       big.area = {x1 = a.x1 - g, y1 = a.y1 - g, x2 = a.x2 + g, y2 = a.y2 + g}
       big.budget = {candidates = 20, successes = 1, work = 60000}
-      P.sub = search_new(big, P.inputs, P.outputs)
+      P.sub = search_new(big, P.inputs, P.outputs) or search_new(big, P.inputs, P.outputs, 3)
       if not P.sub then return false, P.reason end
     end
     if not search_step(P.sub, tick, blocked) then return nil end

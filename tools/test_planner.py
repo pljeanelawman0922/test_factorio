@@ -293,7 +293,7 @@ def fixed():
     g[5][0] = g[5][1] = '>'
     for y in (0, 1, 8, 9):
         g[y][14] = g[y][15] = '>'
-    ok &= run('2->4 bug report layout', rows_of(g), (1, 0, 14, 9), expect=uses('2x4'))
+    ok &= run('2->4 bug report layout', rows_of(g), (1, 0, 14, 9), expect=uses('2x4', 'book'))
     # bug report: 2 -> 4 with two chests right after the splitters; the
     # output in front of them leaves the splitter through an underground
     g = blank(9, 6)
@@ -302,12 +302,23 @@ def fixed():
     for y in (1, 2, 3, 4):
         g[y][8] = '>'
     def under_chests(plan, ents):
-        if plan.template.name != '2x4':
-            return f'expected template 2x4, got {plan.template.name}'
+        if plan.template.name not in ('2x4', 'book'):
+            return f'expected a 2 -> 4 template, got {plan.template.name}'
         if any(e.replace for e in ents):
             return 'replaced a belt end although it was not needed'
         return uses_ug(plan, ents)
     ok &= run('2->4 chests after the splitters', rows_of(g), (0, 0, 8, 5), expect=under_chests)
+    # bug report: train loading station, 3 belts in from the right, 12 belts
+    # into the wagons (two groups of 6). No book design reaches with red
+    # undergrounds, so the generated 3 -> 3 + splitter trees is used.
+    g = blank(41, 33)
+    for x in list(range(21, 27)) + list(range(28, 34)):
+        g[0][x] = g[1][x] = '^'
+    for y in (11, 12, 13):
+        for x in (38, 39, 40):
+            g[y][x] = '<'
+    ok &= run('3->12 loading station (red reach)', rows_of(g), (0, 1, 38, 32), ug_max=7,
+              expect=uses('generated'))
     # too small: the refusal names the design size and a selection that works
     g = blank(6, 4)
     for y in (0, 1, 2):

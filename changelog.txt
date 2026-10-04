@@ -16,7 +16,10 @@ Date: 2026-10-04
     - Planning is spread over ticks (map setting "Planning work per tick", default 500) so the game no longer freezes; the state is kept in storage, safe for saving and multiplayer.
     - Compact 2 -> 3 balancer (7 x 6) from a user's build.
     - 106 balancers imported from a balancer blueprint book (Yellow/Red/Blue books and Raynquist's), every one proved balanced by the simulator; 1-8 -> 1-8 and several larger counts.
-    - Designs with the fewest inputs are tried first; ones with spare inputs only if those don't fit.
+    - Designs with the fewest inputs are tried first; ones with spare inputs only if those don't fit; a generated design if no other fits.
+    - Designs whose undergrounds are longer than the belt tier reaches are skipped (they were reported as "no room").
+    - Generated N -> M with M = M' x 2^k (M' >= N): an N -> M' balancer plus splitter trees, e.g. 3 -> 12 is 13 x 18 instead of 28 x 42.
+    - Larger search budget (100 placements, 600000 work units) with cheaper failures; big selections such as a 3 -> 12 train loading station now plan.
     - Templates support south-facing undergrounds and splitters facing every direction.
   Changes:
     - 4 -> 3 is now supported.
