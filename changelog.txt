@@ -11,6 +11,8 @@ Date: 2026-10-04
     - A balancer's input / output belt may be an existing belt end facing the same way (not rebuilt).
     - When the balancer doesn't fit, the message names the design size and a selection size that works.
     - Designs with unused inputs are avoided when a smaller one fits (2 belts -> 4 now builds 2 -> 4, not 4 -> 4).
+    - A balancer output may go straight into an underground when something sits right in front of it (e.g. chests after the splitters).
+    - Existing input / output belts are only replaced by undergrounds when nothing else works.
   Changes:
     - 4 -> 3 is now supported.
 ---------------------------------------------------------------------------------------------------

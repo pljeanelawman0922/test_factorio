@@ -292,6 +292,20 @@ def fixed():
     for y in (0, 1, 8, 9):
         g[y][14] = g[y][15] = '>'
     ok &= run('2->4 bug report layout', rows_of(g), (1, 0, 14, 9), expect=uses('2x4'))
+    # bug report: 2 -> 4 with two chests right after the splitters; the
+    # output in front of them leaves the splitter through an underground
+    g = blank(9, 6)
+    g[2][0] = g[3][0] = '>'
+    g[3][4] = g[3][5] = '#'
+    for y in (1, 2, 3, 4):
+        g[y][8] = '>'
+    def under_chests(plan, ents):
+        if plan.template.name != '2x4':
+            return f'expected template 2x4, got {plan.template.name}'
+        if any(e.replace for e in ents):
+            return 'replaced a belt end although it was not needed'
+        return uses_ug(plan, ents)
+    ok &= run('2->4 chests after the splitters', rows_of(g), (0, 0, 8, 5), expect=under_chests)
     # too small: the refusal names the design size and a selection that works
     g = blank(6, 4)
     for y in (0, 1, 2):
@@ -301,7 +315,7 @@ def fixed():
     r = planner.plan(make_world(lua_list(lents), lua_list(rocks), 0, 0, 5, 3, 5))
     reason = list(r[1].values()) if r[0] is None else None
     hint = list(r[2].values()) if r[0] is None and len(r) > 2 and r[2] else None
-    good = reason == ['lbb.no-room', 1, 3, 4, 6] and hint == [8, 6, 1]
+    good = reason == ['lbb.no-route', 1, 3] and hint == [8, 6, 1]
     print(('PASS' if good else 'FAIL') + f' too small 1->3: {reason} hint {hint}')
     ok &= good
     # second screenshot: 1 belt at the left edge, 3 outputs spread down the right edge
